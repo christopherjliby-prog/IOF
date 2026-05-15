@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>TradePhantoms_IOF_v3</AssemblyName>
+    <RootNamespace>TradePhantoms_IOF_v3</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="TradePhantoms_IOF_v3.cs" />
+    <Compile Include="AlertsHelper.cs" />
+    <Compile Include="ControlPointMarkerRenderer.cs" />
+    <Compile Include="DashboardRenderer.cs" />
+    <Compile Include="EntryAndTPHelpers.cs" />
+    <Compile Include="MultiTimeframeZones.cs" />
+  </ItemGroup>
+
+</Project>

@@ -566,6 +566,18 @@ namespace TradePhantomsIOF
         // Lifecycle layer.
         private TPLifecycle.TradeLifecycleManager lifecycleManager;
 
+        // Cached dashboard/panel data — rebuilt once per bar in OnUpdate,
+        // consumed every frame in OnPaintChart so the paint thread does no
+        // data-building work.
+        private TPUI.DashboardSettings _cachedDashSettings;
+        private TPUI.DashboardZones    _cachedDashZones;
+        private List<TPUI.ActiveTradeRow> _cachedActiveTrades;
+        private TPUI.DashboardStats    _cachedDashStats;
+        private TPUI.DashboardTrend    _cachedDashTrend;
+        private List<TPUI.ClosedTradeRow> _cachedClosedRows;
+        private List<TPUI.NextTradeRow>   _cachedNextRows;
+        private double _cachedCurrentPrice = double.NaN;
+
         // EMA cache (for Juice scoring).
         private double[] emaCache;
         // 2026-05-12 CVD caches per Agent 5 research synthesis (CVD methodology).
@@ -588,6 +600,7 @@ namespace TradePhantomsIOF
 
         // Bar-index tracking for the lifecycle pass.
         private int lastProcessedBarCount = -1;
+        private int _zoneScanBarCounter = 0;
 
         // Volume-analysis loaded flag.
         private bool volumeAnalysisLoaded;
@@ -702,7 +715,7 @@ namespace TradePhantomsIOF
                           "state machine (ARMED→ACTIVE→W/L/BE), trail strategies, " +
                           "stats strip + closed-trades table + status dashboard.";
 
-            AddLineSeries("IOFv2_marker", Color.Transparent, 1, LineStyle.Solid);
+            AddLineSeries("IOFv3_marker", Color.Transparent, 1, LineStyle.Solid);
             SeparateWindow = false;
         }
 
@@ -719,13 +732,22 @@ namespace TradePhantomsIOF
         // ---------------------------------------------------------------------
         protected override void OnInit()
         {
-            ShortName = $"IOFv2 (>={MinScore}/21)";
+            ShortName = $"IOFv3 (>={MinScore}/21)";
 
             this.zones.Clear();
             this.emaCache = null;
             this.atrCache = null;
             this.dailyAtrCache = null;
             this.lastProcessedBarCount = -1;
+            _zoneScanBarCounter = 0;
+            _cachedDashSettings  = null;
+            _cachedDashZones     = null;
+            _cachedActiveTrades  = null;
+            _cachedDashStats     = null;
+            _cachedDashTrend     = null;
+            _cachedClosedRows    = null;
+            _cachedNextRows      = null;
+            _cachedCurrentPrice  = double.NaN;
 
             // Build pens.
             DisposePens();
@@ -1197,7 +1219,18 @@ namespace TradePhantomsIOF
                     RescanMTFZones();
                 }
 
-                ScanZones();
+                // Throttle: full zone rescan every ZoneScanInterval live bars.
+                // Historical bars always rescan so the initial catch-up is complete.
+                bool _isLiveBar = args.Reason == UpdateReason.NewBar
+                               || args.Reason == UpdateReason.NewLastBar;
+                bool _fullScanDue = !_isLiveBar
+                                 || this.zones.Count == 0
+                                 || (++_zoneScanBarCounter >= 3);
+                if (_fullScanDue)
+                {
+                    _zoneScanBarCounter = 0;
+                    ScanZones();
+                }
 
                 if (this.UseLifecycle && this.lifecycleManager != null)
                 {
@@ -1278,6 +1311,33 @@ namespace TradePhantomsIOF
                 EmitChartStateToBridge();
 
                 this.lastProcessedBarCount = this.Count;
+
+                // Rebuild panel data cache once per bar so OnPaintChart is paint-only.
+                lock (this.tradesLock)
+                {
+                    if (this.ShowStatusDashboard)
+                    {
+                        _cachedDashSettings = BuildDashboardSettings();
+                        _cachedDashZones    = BuildDashboardZones();
+                        _cachedActiveTrades = BuildActiveTradeRows();
+                        _cachedDashStats    = BuildDashboardStats();
+                        _cachedDashTrend    = BuildDashboardTrend();
+                    }
+                    if (this.ShowClosedTradesTable && this.UseLifecycle && this.lifecycleManager != null)
+                    {
+                        var _cr = new List<TPUI.ClosedTradeRow>();
+                        foreach (var _t in this.lifecycleManager.GetClosed(this.MaxClosedVisible))
+                            _cr.Add(ToClosedRow(_t));
+                        _cachedClosedRows = _cr;
+                    }
+                    if (this.ShowNextTradesPanel)
+                    {
+                        var _lb = this.HistoricalData?[1] as HistoryItemBar;
+                        _cachedCurrentPrice = _lb?.Close ?? double.NaN;
+                        if (!double.IsNaN(_cachedCurrentPrice))
+                            _cachedNextRows = BuildNextTradeRows(_cachedCurrentPrice);
+                    }
+                }
             }
             else if (args.Reason == UpdateReason.NewTick &&
                      this.UseLifecycle && this.lifecycleManager != null)
@@ -1468,7 +1528,7 @@ namespace TradePhantomsIOF
             }
 
             this.lastProcessedBarCount = -1;
-            ShortName = $"IOFv2 (>={MinScore}/21)";
+            ShortName = $"IOFv3 (>={MinScore}/21)";
         }
 
         // ---------------------------------------------------------------------
@@ -4006,7 +4066,7 @@ namespace TradePhantomsIOF
                     {
                         // Detected mismatch (>20% off from known table). Trust the
                         // table — protects against ES $50 leaking onto MNQ.
-                        try { Core.Instance.Loggers.Log("[IOFv2] PointValue mismatch: SDK=" + pv.ToString("0.##") + " table=" + rootPv.ToString("0.##") + " for " + root + "; using table.", LoggingLevel.System); } catch {}
+                        try { Core.Instance.Loggers.Log("[IOFv3] PointValue mismatch: SDK=" + pv.ToString("0.##") + " table=" + rootPv.ToString("0.##") + " for " + root + "; using table.", LoggingLevel.System); } catch {}
                         pv = rootPv;
                         source = "root lookup override (" + root + ")";
                     }
@@ -4021,7 +4081,7 @@ namespace TradePhantomsIOF
             {
                 if (!_resolvedPointValueLogged)
                 {
-                    try { Core.Instance.Loggers.Log("[IOFv2] PointValue unresolved for " + (this.Symbol?.Name ?? "?") + " — sizing disabled. Add symbol to LookupKnownPointValue.", LoggingLevel.Error); } catch {}
+                    try { Core.Instance.Loggers.Log("[IOFv3] PointValue unresolved for " + (this.Symbol?.Name ?? "?") + " — sizing disabled. Add symbol to LookupKnownPointValue.", LoggingLevel.Error); } catch {}
                     _resolvedPointValueLogged = true;
                 }
                 return 0;
@@ -4030,7 +4090,7 @@ namespace TradePhantomsIOF
             _resolvedPointValueCache = pv;
             if (!_resolvedPointValueLogged)
             {
-                try { Core.Instance.Loggers.Log("[IOFv2] PointValue resolved: $" + pv.ToString("0.##") + "/pt for " + this.Symbol.Name + " via " + source, LoggingLevel.System); } catch {}
+                try { Core.Instance.Loggers.Log("[IOFv3] PointValue resolved: $" + pv.ToString("0.##") + "/pt for " + this.Symbol.Name + " via " + source, LoggingLevel.System); } catch {}
                 _resolvedPointValueLogged = true;
             }
             return pv;
@@ -5266,62 +5326,33 @@ namespace TradePhantomsIOF
                 }
 
                 // Closed-trades table — fed in newest-first order.
-                if (this.ShowClosedTradesTable && this.UseLifecycle && this.lifecycleManager != null)
+                if (this.ShowClosedTradesTable && _cachedClosedRows != null)
                 {
-                    var rows = new List<TPUI.ClosedTradeRow>();
-                    lock (this.tradesLock)
-                    {
-                        foreach (var t in this.lifecycleManager.GetClosed(this.MaxClosedVisible))
-                            rows.Add(ToClosedRow(t));
-                    }
                     TPUI.DashboardRenderer.DrawClosedTradesTable(
-                        gr, mainWindow.ClientRectangle, rows,
+                        gr, mainWindow.ClientRectangle, _cachedClosedRows,
                         this.MaxClosedVisible, this.ClosedTablePos, this.TextSize);
                 }
 
                 // Status dashboard.
-                if (this.ShowStatusDashboard)
+                if (this.ShowStatusDashboard && _cachedDashSettings != null)
                 {
-                    TPUI.DashboardSettings settings;
-                    TPUI.DashboardZones zonesB;
-                    List<TPUI.ActiveTradeRow> actives;
-                    TPUI.DashboardStats stats;
-                    TPUI.DashboardTrend dashTrend;            // 2026-05-06: optional TREND section
-                    lock (this.tradesLock)
-                    {
-                        settings  = BuildDashboardSettings();
-                        zonesB    = BuildDashboardZones();
-                        actives   = BuildActiveTradeRows();
-                        stats     = BuildDashboardStats();
-                        dashTrend = BuildDashboardTrend();    // null when feature is off
-                    }
                     TPUI.DashboardRenderer.DrawStatusDashboard(
                         gr, mainWindow.ClientRectangle,
-                        settings, zonesB, actives, stats,
+                        _cachedDashSettings, _cachedDashZones, _cachedActiveTrades, _cachedDashStats,
                         this.DashboardPos, this.TextSize,
-                        dashTrend);
+                        _cachedDashTrend);
                 }
 
                 // Next-trades preview panel (2 demand + 2 supply closest to
                 // price, filtered by structural 3R+). Standalone panel — sits
                 // wherever the user puts it; defaults to BottomLeft (opposite
                 // the status dashboard's default TopRight).
-                if (this.ShowNextTradesPanel)
+                if (this.ShowNextTradesPanel && _cachedNextRows != null && !double.IsNaN(_cachedCurrentPrice))
                 {
-                    var lastBarN = this.HistoricalData?[1] as HistoryItemBar;
-                    double curPriceN = lastBarN?.Close ?? double.NaN;
-                    if (!double.IsNaN(curPriceN))
-                    {
-                        List<TPUI.NextTradeRow> nextRows;
-                        lock (this.tradesLock)
-                        {
-                            nextRows = BuildNextTradeRows(curPriceN);
-                        }
-                        TPUI.DashboardRenderer.DrawNextTradesPanel(
-                            gr, mainWindow.ClientRectangle,
-                            nextRows, curPriceN,
-                            this.NextTradesPanelPos, this.TextSize);
-                    }
+                    TPUI.DashboardRenderer.DrawNextTradesPanel(
+                        gr, mainWindow.ClientRectangle,
+                        _cachedNextRows, _cachedCurrentPrice,
+                        this.NextTradesPanelPos, this.TextSize);
                 }
             }
             catch (Exception ex)
