@@ -1,0 +1,44 @@
+name: IOF Autonomous Agent
+
+on:
+  schedule:
+    # Runs every hour at :00 — adjust cron to change frequency
+    # Examples:  '*/30 * * * *'  = every 30 min
+    #            '0 */4 * * *'   = every 4 hours
+    #            '0 9,13,17 * * 1-5' = 9am/1pm/5pm weekdays only
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: false
+        default: 'Manual run'
+
+jobs:
+  run-agent:
+    name: IOF Agent Cycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: iof_agent/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r iof_agent/requirements.txt
+
+      - name: Run IOF Agent
+        working-directory: iof_agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # Optional — set to christopherjliby@gmail.com if using domain-wide delegation
+          GOOGLE_DELEGATED_EMAIL: ${{ secrets.GOOGLE_DELEGATED_EMAIL }}
+        run: python agent.py
