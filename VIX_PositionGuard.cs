@@ -1,14 +1,30 @@
-// VIX_PositionGuard.cs
-// TradePhantoms — VIX Volatility Safety Indicator
-// Version: 1.0.0
-// Platform: Quantower C# SDK
-// Author: Christopher's Claude (built 2026-05-16)
+// =============================================================================
+// VIX_PositionGuard.cs — TradePhantoms Volatility Safety Indicator
+// =============================================================================
+// Platform : Quantower C# SDK (v1.143.x)
+// Drop path: C:\Quantower\Settings\Scripts\Indicators\IOF
 //
-// VIX > 25   →  MAX 10 micros   (EXTREME — 100pt 1m candles)
-// VIX 18-25  →  MAX 20 micros   (ELEVATED)
-// VIX < 18   →  MAX 20-50       (NORMAL — full size)
+// Position size caps by VIX regime (Christopher's rule, 2026-05-16):
+//   VIX > 25   →  MAX 10 micros   (EXTREME  — 100pt 1m candles confirmed)
+//   VIX 18-25  →  MAX 20 micros   (ELEVATED — tread carefully)
+//   VIX < 18   →  MAX 20-50       (NORMAL   — full size range)
 //
-// DROP PATH: C:\Quantower\Settings\Scripts\Indicators\IOF
+// Public API for IOF v2 integration:
+//   guard.IsAllowed(n)    → false if n contracts exceeds current cap
+//   guard.MaxContractsNow() → current hard cap as int
+//   guard.VixLevel        → live VIX price
+//   guard.Regime          → VixRegime enum value
+//
+// -----------------------------------------------------------------------------
+// PATCH NOTES
+// -----------------------------------------------------------------------------
+// 2026-05-16: Initial build.
+//   - Live VIX symbol subscription via Core.Instance.GetSymbol
+//   - HUD overlay: current VIX, regime label, max contracts now, threshold table
+//   - Color-coded regime bar (green/yellow/red)
+//   - All thresholds user-adjustable inputs
+//   - Fail-safe: Unknown regime → most restrictive cap (same as Extreme)
+// =============================================================================
 
 using System;
 using System.Drawing;
