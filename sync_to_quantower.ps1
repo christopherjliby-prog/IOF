@@ -2,11 +2,14 @@
 # sync_to_quantower.ps1 — IOF Indicator Auto-Sync
 # =============================================================================
 # Pulls the latest indicator files from the IOF GitHub repo and copies them
-# to your Quantower scripts folder. Run this whenever you want to update.
+# to your Quantower scripts folder.
 #
-# USAGE (run as normal user — no admin needed):
+# USAGE (manual):
 #   Right-click → "Run with PowerShell"
 #   OR from PowerShell terminal: .\sync_to_quantower.ps1
+#
+# USAGE (silent — called by Task Scheduler on logon):
+#   powershell.exe -WindowStyle Hidden -File sync_to_quantower.ps1 -Silent
 #
 # QUANTOWER PATH: C:\Quantower\Settings\Scripts\Indicators\IOF
 #
@@ -24,12 +27,20 @@
 # -----------------------------------------------------------------------------
 # PATCH NOTES
 # -----------------------------------------------------------------------------
+# 2026-05-17: Added -Silent flag for Task Scheduler / headless use.
+#   - Logs results to C:\Quantower\Settings\Scripts\Indicators\IOF\sync_log.txt
+#     instead of console when running silently
+#
 # 2026-05-17: Initial build.
 #   - Downloads .cs files directly from GitHub raw content (no git required)
 #   - Creates Quantower folder if it doesn't exist
 #   - Backs up existing files to IOF\_backup_YYYYMMDD_HHMMSS\ before overwriting
 #   - Shows a simple pass/fail summary at the end
 # =============================================================================
+
+param(
+    [switch]$Silent   # Pass -Silent to suppress all UI (used by Task Scheduler)
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -55,18 +66,35 @@ $FilesToSync = @(
 
 $RawBase = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch"
 
+# ── Logging helper ────────────────────────────────────────────────────────────
+
+$LogFile = Join-Path $QuantowerPath "sync_log.txt"
+
+function Write-Log {
+    param([string]$Message, [string]$Color = "White")
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $Message"
+    if (-not $Silent) {
+        Write-Host $Message -ForegroundColor $Color
+    }
+    # Always append to log file (create folder first if needed)
+    if (-not (Test-Path $QuantowerPath)) {
+        New-Item -ItemType Directory -Path $QuantowerPath -Force | Out-Null
+    }
+    Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
+}
+
 # ── Pre-flight ────────────────────────────────────────────────────────────────
 
-Write-Host ""
-Write-Host "IOF Quantower Sync" -ForegroundColor Cyan
-Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host "Target: $QuantowerPath"
-Write-Host "Source: github.com/$RepoOwner/$RepoName @ $Branch"
-Write-Host ""
+Write-Log ""
+Write-Log "IOF Quantower Sync" "Cyan"
+Write-Log "─────────────────────────────────────────" "DarkGray"
+Write-Log "Target: $QuantowerPath"
+Write-Log "Source: github.com/$RepoOwner/$RepoName @ $Branch"
+Write-Log ""
 
 # Create folder if it doesn't exist
 if (-not (Test-Path $QuantowerPath)) {
-    Write-Host "Creating folder: $QuantowerPath" -ForegroundColor Yellow
+    Write-Log "Creating folder: $QuantowerPath" "Yellow"
     New-Item -ItemType Directory -Path $QuantowerPath -Force | Out-Null
 }
 
@@ -77,8 +105,8 @@ if ($existing.Count -gt 0) {
     $backupDir = Join-Path $QuantowerPath "_backup_$stamp"
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     $existing | Copy-Item -Destination $backupDir
-    Write-Host "Backed up $($existing.Count) existing file(s) → _backup_$stamp" -ForegroundColor DarkGray
-    Write-Host ""
+    Write-Log "Backed up $($existing.Count) existing file(s) → _backup_$stamp" "DarkGray"
+    Write-Log ""
 }
 
 # ── Download ──────────────────────────────────────────────────────────────────
@@ -94,17 +122,17 @@ foreach ($file in $FilesToSync) {
     try {
         $response = Invoke-WebRequest -Uri $url -UseBasicParsing -ErrorAction Stop
         [System.IO.File]::WriteAllBytes($destPath, $response.Content)
-        Write-Host "  OK  $file" -ForegroundColor Green
+        Write-Log "  OK  $file" "Green"
         $passed++
         $results += [PSCustomObject]@{ File = $file; Status = "OK" }
     }
     catch {
         $code = $_.Exception.Response.StatusCode.Value__
         if ($code -eq 404) {
-            Write-Host " SKIP $file (not in repo yet)" -ForegroundColor DarkGray
+            Write-Log " SKIP $file (not in repo yet)" "DarkGray"
             $results += [PSCustomObject]@{ File = $file; Status = "SKIP (404)" }
         } else {
-            Write-Host " FAIL $file — $_" -ForegroundColor Red
+            Write-Log " FAIL $file — $_" "Red"
             $failed++
             $results += [PSCustomObject]@{ File = $file; Status = "FAIL: $_" }
         }
@@ -113,20 +141,22 @@ foreach ($file in $FilesToSync) {
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-Write-Host ""
-Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
+Write-Log ""
+Write-Log "─────────────────────────────────────────" "DarkGray"
 if ($failed -eq 0) {
-    Write-Host "Sync complete — $passed file(s) updated." -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Reload the indicator in Quantower to apply changes:" -ForegroundColor Yellow
-    Write-Host "  Settings → Scripts → right-click indicator → Reload" -ForegroundColor White
+    Write-Log "Sync complete — $passed file(s) updated." "Green"
+    if (-not $Silent) {
+        Write-Host ""
+        Write-Host "Reload the indicator in Quantower to apply changes:" -ForegroundColor Yellow
+        Write-Host "  Settings → Scripts → right-click indicator → Reload" -ForegroundColor White
+    }
 } else {
-    Write-Host "Sync finished with $failed failure(s). Check output above." -ForegroundColor Red
+    Write-Log "Sync finished with $failed failure(s). Check sync_log.txt for details." "Red"
 }
-Write-Host ""
+Write-Log ""
 
-# Keep window open if double-clicked
-if ($Host.Name -eq "ConsoleHost") {
+# Keep window open if double-clicked (interactive mode only)
+if (-not $Silent -and $Host.Name -eq "ConsoleHost") {
     Write-Host "Press any key to close..."
     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
