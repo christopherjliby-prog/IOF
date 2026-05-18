@@ -148,22 +148,65 @@ a compounding way:
 
 ---
 
+### FACTOR 6 — INSTRUMENT LIQUIDITY: MANDATORY MES PARALLEL TEST
+
+**What it is:**
+The bot tournament runs on MNQ. MNQ is the thinnest book of the primary test
+instruments. ES trades 1–1.5 million contracts per day. NQ trades 300–500k.
+MNQ is a fraction of that. Thinner books mean:
+- More noise-driven wick penetrations on lower timeframes
+- Stops fill further past trigger price during fast moves
+- IOF base formations less reliably represent genuine institutional orders
+
+ES/MES has 3–4× more liquidity depth. IOF zones on ES/MES are backed by deeper
+institutional order flow — which is the entire premise of the strategy.
+
+**Mandatory parallel test:**
+Every bot that passes all other RWES criteria must also be run on MES for the
+same date range and compared against its MNQ results.
+
+| Metric                        | MNQ | MES |
+|-------------------------------|-----|-----|
+| Raw win rate                  | ?   | ?   |
+| RWES-adjusted win rate        | ?   | ?   |
+| Zone hold rate (no stop-out)  | ?   | ?   |
+| Average stop fill slippage    | ?   | ?   |
+| Profit factor (slippage adj.) | ?   | ?   |
+| Worst intraday drawdown       | ?   | ?   |
+
+**Deployment decision:**
+- If MES win rate and zone hold rate are meaningfully higher → primary live
+  instrument is MES, MNQ is secondary/stress-test only
+- If results are equivalent → trader's discretion
+- MNQ-only results are never sufficient for live deployment approval
+
+**Volume reference:**
+| Contract | Daily Volume    | Tick Value | Liquidity Profile |
+|----------|----------------|-----------|-------------------|
+| ES       | 1–1.5M contracts | $12.50   | Deepest — institutional standard |
+| MES      | 300–500k       | $1.25     | Mirrors ES, same zone reliability |
+| NQ       | 300–500k       | $5.00     | Moderate |
+| MNQ      | 100–200k       | $0.50     | Thinnest — highest noise risk |
+
+---
+
 ## PASS/FAIL CRITERIA
 
 A bot PASSES the Real-World Execution Standard if:
 
-| Test                                   | Requirement                              |
-|----------------------------------------|------------------------------------------|
-| Stop slippage adjusted win rate        | ≥ 60% after 1–2 tick slippage applied   |
-| News-filtered win rate                 | ≥ 55% after news trades adjusted         |
-| VL-adjusted win rate                   | Does not collapse vs. raw win rate       |
-| Stop buffer                            | ≥ 2 ticks — hard requirement            |
-| SL placement                           | Far wick of base candle cluster, always  |
+| Test                                   | Requirement                                        |
+|----------------------------------------|----------------------------------------------------|
+| Stop slippage adjusted win rate        | ≥ 60% after 1–2 tick slippage applied              |
+| News-filtered win rate                 | ≥ 55% after news trades adjusted                   |
+| VL-adjusted win rate                   | Does not collapse vs. raw win rate                 |
+| Stop buffer                            | ≥ 2 ticks — hard requirement                      |
+| SL placement                           | Far wick of base candle cluster, always            |
 | Wick SL hit = loss                     | Enforced in code — no re-entry after wick stop-out |
-| One touch only                         | Enforced in code — zone burned after first touch |
-| Counter-trend target                   | 1:1 R:R ONLY — no TP2/TP3 on CT trades |
-| Intraday DLL buffer                    | ≥ $300 below DLL on worst-case day      |
-| Profit factor (slippage adjusted)      | ≥ 1.5                                   |
+| One touch only                         | Enforced in code — zone burned after first touch   |
+| Counter-trend target                   | 1:1 R:R ONLY — no TP2/TP3 on CT trades            |
+| Intraday DLL buffer                    | ≥ $300 below DLL on worst-case day                |
+| Profit factor (slippage adjusted)      | ≥ 1.5                                              |
+| MES parallel test                      | Completed and results documented                   |
 
 A bot FAILS if any single criterion is not met. There is no partial pass.
 
