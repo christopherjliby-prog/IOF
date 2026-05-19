@@ -4597,8 +4597,10 @@ namespace TradePhantomsIOF
                 // a post-formation wick? Sets io.IsWickBlown independently of
                 // Invalidated (which is close-based). Trend state machine is
                 // unaffected — it reads close-based IsValidForTrend separately.
+                // Pass ltfFeed so index lookups use the same feed the zones
+                // were detected on (fixes mismatch when LTFOverrideEnabled).
                 if (this.Symbol != null)
-                    CheckWickBlow(io, this.Symbol.TickSize);
+                    CheckWickBlow(io, this.Symbol.TickSize, ltfFeed);
 
                 // IM7: fold MTFC bonus in BEFORE MinScore so a 13.x raw
                 // score lifted to 14.x by the bonus is admitted. Bonus only
@@ -4858,17 +4860,20 @@ namespace TradePhantomsIOF
         // If any bar's wick touches or exceeds that level, the zone is
         // ineligible to arm (IsWickBlown = true). Invalidated (close-based)
         // and IsValidForTrend (close-based trend machine input) are unaffected.
-        private void CheckWickBlow(IofZone z, double tickSize)
+        private void CheckWickBlow(IofZone z, double tickSize, HistoricalData feed = null)
         {
             if (tickSize <= 0) return;
+            // Use the same feed the zone was detected on so EndIndex is valid.
+            var src = feed ?? this.HistoricalData;
+            if (src == null || src.Count == 0) return;
             bool isDemand = z.Type == ZoneType.RBR || z.Type == ZoneType.DBR;
             double slBuffer = this.StopBufferTicks * tickSize;
             double slLevel  = isDemand ? z.WickLo - slBuffer : z.WickHi + slBuffer;
 
             int scanStart = z.EndIndex + 1;
-            for (int i = scanStart; i < this.HistoricalData.Count; i++)
+            for (int i = scanStart; i < src.Count; i++)
             {
-                var bar = this.HistoricalData[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                var bar = src[i, SeekOriginHistory.Begin] as HistoryItemBar;
                 if (bar == null) continue;
                 bool blown = isDemand ? bar.Low <= slLevel : bar.High >= slLevel;
                 if (!blown) continue;
@@ -5864,8 +5869,16 @@ namespace TradePhantomsIOF
             double sl = TradePhantomsIOF.EntryTPMath.ComputeOrigSL(
                 isDemand, z.WickHi, z.WickLo, tickSize, this.StopBufferTicks);
             double zoneHeight = Math.Abs(z.Top - z.Bottom);
+            // v2.0: mirror the CT 1:1 cap from TryPublishIntent so reference
+            // lines show the correct TP structure (1 TP for CT, full cascade
+            // for with-trend). Without this, TP2/TP3 lines appear on chart
+            // for CT zones even though those targets won't be traded.
+            bool isCtRef = (this.trendStateMachine != null) && (
+                ( isDemand && this.trendStateMachine.CurrentState == TradePhantomsIOF.Trend.TrendState.Bear) ||
+                (!isDemand && this.trendStateMachine.CurrentState == TradePhantomsIOF.Trend.TrendState.Bull));
+            int refTpCount = isCtRef ? 1 : this.TpCount;
             var tps = TradePhantomsIOF.EntryTPMath.ComputeTPs(
-                isDemand, entry, zoneHeight, this.TpCount, this.TpStep);
+                isDemand, entry, zoneHeight, refTpCount, this.TpStep);
 
             // Faint dashed lines from the zone's start to the right edge.
             using (var entryPenPreview = new Pen(Color.FromArgb(120, 0, 200, 0), 1f) { DashStyle = DashStyle.Dash })
