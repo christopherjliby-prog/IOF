@@ -28,7 +28,14 @@
 // 4. DOLLAR RISK DEFAULT: $135 (was $100)
 //    Matches Christopher's live trading configuration.
 //
-// 5. WICK-BLOW TRADE ELIGIBILITY (IsWickBlown)
+// 5. ONE-TOUCH DOCTRINE GATE (MaxPriorTouches)
+//    New input: "Max prior touches to arm" — default 0 (virgin zones only).
+//    Zones with TouchCount > MaxPriorTouches are blocked from ARM eligibility.
+//    Set to -1 to disable (reverts to v1 behavior — no touch limit).
+//    Set to 0: only zones never previously entered can arm (RWES strict).
+//    Zones with P1/P2 etc. stay visible on chart but will NOT show PRE-ARM.
+//
+// 6. WICK-BLOW TRADE ELIGIBILITY (IsWickBlown)
 //    Zones whose SL level has been penetrated by any post-formation wick
 //    are marked IsWickBlown = true and excluded from ARM eligibility.
 //    SL level = WickHi + (StopBufferTicks × tick) for supply zones;
@@ -257,6 +264,14 @@ namespace TradePhantomsIOF
         // Default 10 points covers CME Velocity Logic worst-case on MNQ/MES.
         [InputParameter("Slippage buffer (points)", 27, 0.0, 50.0, 0.25, 2)]
         public double SlippagePoints = 10.0;
+
+        // v2.0: One-touch doctrine gate. Zones with more prior touches than
+        // this value are excluded from ARM eligibility entirely. Default 0
+        // enforces strict "virgin zones only" per RWES — only zones that have
+        // never been entered can arm. Set to 1 to allow one prior touch, -1
+        // to disable the gate completely (reverts to v1 behavior).
+        [InputParameter("Max prior touches to arm (-1 = unlimited, 0 = virgin only)", 28, -1, 10, 1, 0)]
+        public int MaxPriorTouches = 0;
 
         [InputParameter("Lifecycle history bars", 28, 100, 100000, 100, 0)]
         public int LifecycleHistoryBars = 1000;
@@ -2209,6 +2224,10 @@ namespace TradePhantomsIOF
                 // was already reached by a prior wick — any entry now has no
                 // structural stop. Label shows "WB" to flag these visually.
                 if (z.IsWickBlown) continue;
+                // v2.0: one-touch doctrine gate. If MaxPriorTouches >= 0,
+                // zones with more prior touches than the threshold cannot arm.
+                // Default 0 = virgin zones only (RWES strict). Set -1 to disable.
+                if (this.MaxPriorTouches >= 0 && z.TouchCount > this.MaxPriorTouches) continue;
 
                 list.Add(new TPLifecycle.ZoneInfo
                 {
