@@ -270,7 +270,7 @@ namespace TradePhantomsIOF
         // enforces strict "virgin zones only" per RWES — only zones that have
         // never been entered can arm. Set to 1 to allow one prior touch, -1
         // to disable the gate completely (reverts to v1 behavior).
-        [InputParameter("Max prior touches to arm (-1 = unlimited, 0 = virgin only)", 28, -1, 10, 1, 0)]
+        [InputParameter("Max prior touches to arm (-1 = unlimited, 0 = virgin only)", 32, -1, 10, 1, 0)]
         public int MaxPriorTouches = 0;
 
         [InputParameter("Lifecycle history bars", 28, 100, 100000, 100, 0)]
