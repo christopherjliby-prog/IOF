@@ -28,10 +28,23 @@
 // 4. DOLLAR RISK DEFAULT: $135 (was $100)
 //    Matches Christopher's live trading configuration.
 //
+// 5. WICK-BLOW TRADE ELIGIBILITY (IsWickBlown)
+//    Zones whose SL level has been penetrated by any post-formation wick
+//    are marked IsWickBlown = true and excluded from ARM eligibility.
+//    SL level = WickHi + (StopBufferTicks × tick) for supply zones;
+//               WickLo - (StopBufferTicks × tick) for demand zones.
+//    The zone remains visible on the chart (drawn dim/strikethrough label)
+//    so the trader can see what got blown — it just cannot trade again.
+//    The trend state machine reads IsValidForTrend (close-based, unchanged)
+//    and is NOT affected by wick-blow status. These are two independent
+//    concepts: wick blows eligibility, closes break the trend.
+//    Label suffix "WB" appears when a zone is wick-blown.
+//
 // TEST PROTOCOL
 //    Run this v2.0 alongside v2.1.3-tp-entries on the same chart.
 //    Compare: contract sizes, zone labels, TP levels on counter-trend zones.
 //    v2.0 will show lower contract counts and single TP on CT zones.
+//    Zones with "WB" in label had their SL wick penetrated — won't arm.
 //
 // =============================================================================
 // TradePhantoms_IOF_v2.cs — Master indicator integration (Path A full rebuild)
@@ -2191,6 +2204,11 @@ namespace TradePhantomsIOF
                 // MinScore are visible on chart but cannot ARM/fill — keeps
                 // the trader's eye informed without polluting trade decisions.
                 if (z.Score < MinScore) continue;
+                // v2.0: wick-blown zones stay visible (trader needs to see what
+                // got hit) but are permanently ineligible to arm. The SL level
+                // was already reached by a prior wick — any entry now has no
+                // structural stop. Label shows "WB" to flag these visually.
+                if (z.IsWickBlown) continue;
 
                 list.Add(new TPLifecycle.ZoneInfo
                 {
@@ -4556,6 +4574,13 @@ namespace TradePhantomsIOF
 
                 ScoreZone(io);
 
+                // v2.0 wick-blow check: was this zone's SL level penetrated by
+                // a post-formation wick? Sets io.IsWickBlown independently of
+                // Invalidated (which is close-based). Trend state machine is
+                // unaffected — it reads close-based IsValidForTrend separately.
+                if (this.Symbol != null)
+                    CheckWickBlow(io, this.Symbol.TickSize);
+
                 // IM7: fold MTFC bonus in BEFORE MinScore so a 13.x raw
                 // score lifted to 14.x by the bonus is admitted. Bonus only
                 // applies to chart-TF zones whose box overlaps a same-
@@ -4804,6 +4829,33 @@ namespace TradePhantomsIOF
             z.JuiceScore    = ScoreJuice(z);
             z.Score = z.RangeScore + z.TimeScore + z.PurityScore +
                       z.StrengthScore + z.TrendScore + z.RrrScore + z.JuiceScore;
+        }
+
+        // v2.0: Wick-blow eligibility check. Scans every bar after zone
+        // formation to see if any wick reached the SL price level. The SL
+        // level is the same one the lifecycle would place on entry:
+        //   supply: WickHi + StopBufferTicks × tickSize
+        //   demand: WickLo - StopBufferTicks × tickSize
+        // If any bar's wick touches or exceeds that level, the zone is
+        // ineligible to arm (IsWickBlown = true). Invalidated (close-based)
+        // and IsValidForTrend (close-based trend machine input) are unaffected.
+        private void CheckWickBlow(IofZone z, double tickSize)
+        {
+            if (tickSize <= 0) return;
+            bool isDemand = z.Type == ZoneType.RBR || z.Type == ZoneType.DBR;
+            double slBuffer = this.StopBufferTicks * tickSize;
+            double slLevel  = isDemand ? z.WickLo - slBuffer : z.WickHi + slBuffer;
+
+            int scanStart = z.EndIndex + 1;
+            for (int i = scanStart; i < this.HistoricalData.Count; i++)
+            {
+                var bar = this.HistoricalData[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                if (bar == null) continue;
+                bool blown = isDemand ? bar.Low <= slLevel : bar.High >= slLevel;
+                if (!blown) continue;
+                z.IsWickBlown = true;
+                return;
+            }
         }
 
         private int ScoreRange(IofZone z)
@@ -5529,6 +5581,10 @@ namespace TradePhantomsIOF
 
             // MTFC bonus tag (already formatted by caller).
             sb.Append(mtfcTag);
+
+            // v2.0: wick-blow flag — SL level was reached by a post-zone wick.
+            // Zone stays visible but cannot arm. Shown last so it's obvious.
+            if (z.IsWickBlown) sb.Append(" ⛔WB");
 
             return sb.ToString();
         }
@@ -6610,6 +6666,7 @@ namespace TradePhantomsIOF
             public double EstimatedTargetPrice;
 
             public bool Invalidated;            // true after price closes through the far wick
+            public bool IsWickBlown;            // true after any post-zone wick penetrates the SL level
 
             // 2026-05-11: Globex Trap candidate flag (per the Globex Traps 101
             // PDF doctrine). Supply zone whose entire BODY sits above current
