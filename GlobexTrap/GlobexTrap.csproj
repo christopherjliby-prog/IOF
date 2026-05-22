@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>IOF_GlobexTrap</AssemblyName>
+    <RootNamespace>GlobexTrap</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Optimize>true</Optimize>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!-- Output goes to a subfolder you can copy straight into Quantower -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>bin\Release\</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Quantower SDK — published on NuGet.org as TradingPlatform.BusinessLayer.
+      Use the version that matches your installed Quantower build.
+      Check: Quantower → Help → About → build number.
+      Latest stable as of 2026-05: 1.5.x  (update the wildcard if needed)
+    -->
+    <PackageReference Include="TradingPlatform.BusinessLayer" Version="*" />
+  </ItemGroup>
+
+</Project>
