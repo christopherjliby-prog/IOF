@@ -1,26 +1,32 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <LangVersion>latest</LangVersion>
     <AssemblyName>IOF_GlobexTrap</AssemblyName>
     <RootNamespace>GlobexTrap</RootNamespace>
-    <Nullable>disable</Nullable>
-    <ImplicitUsings>disable</ImplicitUsings>
-    <Optimize>true</Optimize>
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
-    <!-- Output goes to a subfolder you can copy straight into Quantower -->
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\Release\</OutputPath>
+    <OutputPath>./bin/Release/</OutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!--
-      Quantower SDK — published on NuGet.org as TradingPlatform.BusinessLayer.
-      Use the version that matches your installed Quantower build.
-      Check: Quantower → Help → About → build number.
-      Latest stable as of 2026-05: 1.5.x  (update the wildcard if needed)
+      Point this at YOUR Quantower install.
+      Check your exact version folder: C:\Quantower\TradingPlatform\
+      Brandon's build uses v1.145.17 — update if yours differs.
     -->
-    <PackageReference Include="TradingPlatform.BusinessLayer" Version="*" />
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>C:\Quantower\TradingPlatform\v1.145.17\bin\TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
