@@ -134,6 +134,7 @@ Brandon ran a variant tournament on the IOF indicator parameters.
 3. **He decides everything** — You present analysis, he pulls the trigger
 4. **No live deploy until Phase 2 confirms** — Tournament alone (even with MC) is not enough
 5. **Full zip delivery only** — Pasting code patches doesn't work with Quantower's multi-file build system. Always package as a zip with compiled DLL.
+6. **Lucid execution rules** — Lucid has severe slippage on fast moves. Two hard rules: (a) **No MGC on Lucid accounts ever** — live trade blew through a $200 risk stop for -$1,858 on a single 50-tick candle. (b) **10 contract max on Lucid accounts** across all instruments. Other firms do not have this restriction.
 
 ---
 
