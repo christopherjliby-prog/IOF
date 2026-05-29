@@ -203,6 +203,9 @@ namespace TradePhantomsIOF
         [InputParameter("Max contracts (cap)", 26, 1, 1000, 1, 0)]
         public int MaxContracts = 20;
 
+        [InputParameter("Trail stop % of SL (0 = hide)", 32, 0.0, 1.0, 0.05, 2)]
+        public double TrailStopPct = 0.40;
+
         [InputParameter("Lifecycle history bars", 27, 100, 100000, 100, 0)]
         public int LifecycleHistoryBars = 1000;
 
@@ -5712,7 +5715,14 @@ namespace TradePhantomsIOF
                 return $" | TOO WIDE: ${this.DollarRiskPerTrade:N0}<{slDist*pointVal:N0}";
             }
 
-            return $" | {contracts}c @ ${this.DollarRiskPerTrade:N0} | 1:{rrTo3:0.#}";
+            string tsTag = "";
+            if (this.TrailStopPct > 0)
+            {
+                int tsTicks = (int)Math.Round(slDist / tickSize * this.TrailStopPct);
+                if (tsTicks > 0) tsTag = $" | TS:{tsTicks}t";
+            }
+
+            return $" | {contracts}c @ ${this.DollarRiskPerTrade:N0} | 1:{rrTo3:0.#}{tsTag}";
         }
 
         /// <summary>
