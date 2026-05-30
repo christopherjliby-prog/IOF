@@ -107,6 +107,22 @@ namespace GlobexTrap
         [InputParameter("MTFC border", 39)]
         public Color MtfcBorder = Color.FromArgb(230, 255, 215, 0);
 
+        // ── Position sizing ────────────────────────────────────────────────────
+        [InputParameter("Dollar risk per trade", 40, 10, 5000, 5, 2)]
+        public double DollarRiskPerTrade = 135.0;
+
+        [InputParameter("Max contracts (cap)", 41, 1, 50, 1, 0)]
+        public int MaxContracts = 10;
+
+        [InputParameter("Stop buffer ticks", 42, 0, 20, 1, 0)]
+        public int StopBufferTicks = 2;
+
+        [InputParameter("Trail stop % of SL (0 = hide)", 43, 0.0, 1.0, 0.05, 2)]
+        public double TrailStopPct = 0.40;
+
+        [InputParameter("TP step (x zone height)", 44, 0.5, 10.0, 0.5, 1)]
+        public double TpStep = 2.0;
+
         // ── Internal types ──────────────────────────────────────────────────────
         private struct Zone
         {
@@ -147,7 +163,6 @@ namespace GlobexTrap
             Name           = "IOF Globex Trap";
             ShortName      = "IOF-GT";
             Description    = "Asia/London session levels + 15m/1h/4h IOF zones. MTFC = yellow.";
-            IsOverlay      = true;
             SeparateWindow = false;
         }
 
@@ -167,7 +182,7 @@ namespace GlobexTrap
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            if (args.Reason != UpdateReason.BarClose &&
+            if (args.Reason != UpdateReason.NewBar &&
                 args.Reason != UpdateReason.HistoricalBar) return;
             Rescan();
         }
@@ -292,7 +307,7 @@ namespace GlobexTrap
                     for (int j = endIdx + 1; j < total; j++)
                     {
                         var bj = GetBar(data, j); if (bj == null) continue;
-                        bool broken = isDemand ? bj.Close < wickLo : bj.Close > wickHi;
+                        bool broken = isDemand ? bj.Low < wickLo : bj.High > wickHi;
                         if (broken) { active = false; break; }
                     }
                     if (!active) continue;
@@ -398,7 +413,7 @@ namespace GlobexTrap
         {
             if (this.Symbol == null) return;
             var gr  = args.Graphics;
-            var win = args.MainWindow;
+            var win = this.CurrentChart.MainWindow;
             try
             {
                 if (Show4h)  DrawZones(gr, win, _zones4h,  Fill4h,  Border4h,  "4H");
@@ -451,6 +466,10 @@ namespace GlobexTrap
             List<Zone> zones, Color fill, Color border, string tierLabel)
         {
             if (zones == null) return;
+
+            double tick = (this.Symbol?.TickSize > 0) ? this.Symbol.TickSize : 0.25;
+            double pv   = ResolvePointValue();
+
             foreach (var z in zones)
             {
                 int yT = PY(win, z.Top);
@@ -469,6 +488,22 @@ namespace GlobexTrap
                 if (ShowLabels)
                 {
                     string txt = $"{tierLabel} {z.Formation}";
+
+                    if (pv > 0 && tick > 0 && DollarRiskPerTrade > 0)
+                    {
+                        var (contracts, _, slDist) = ComputeZoneSizing(z, tick, pv);
+                        if (contracts > 0 && slDist > 0)
+                        {
+                            double rrr = TpStep * (z.Top - z.Bottom) / slDist;
+                            txt += $" · {contracts}c · ${DollarRiskPerTrade:0} · 1:{rrr:0.#}";
+                            if (TrailStopPct > 0)
+                            {
+                                int tsTicks = (int)Math.Round(slDist / tick * TrailStopPct);
+                                if (tsTicks > 0) txt += $" · TS:{tsTicks}t";
+                            }
+                        }
+                    }
+
                     using (var f  = new Font("Arial", 7f, FontStyle.Bold))
                     using (var sh = new SolidBrush(Color.FromArgb(160, 0, 0, 0)))
                     using (var wh = new SolidBrush(Color.White))
@@ -478,6 +513,57 @@ namespace GlobexTrap
                     }
                 }
             }
+        }
+
+        private (int Contracts, double DollarRisk, double SlDist) ComputeZoneSizing(
+            Zone z, double tick, double pointValue)
+        {
+            if (tick <= 0 || pointValue <= 0) return (0, 0, 0);
+            try
+            {
+                double entry  = z.IsDemand ? z.Top    : z.Bottom;
+                double sl     = z.IsDemand ? z.Bottom - StopBufferTicks * tick
+                                           : z.Top    + StopBufferTicks * tick;
+                double slDist = Math.Abs(entry - sl);
+                if (slDist <= 0) return (0, 0, 0);
+
+                int contracts = (int)Math.Floor(DollarRiskPerTrade / (slDist * pointValue));
+                contracts = Math.Max(0, Math.Min(contracts, MaxContracts));
+                if (contracts <= 0) return (0, 0, 0);
+
+                return (contracts, DollarRiskPerTrade, slDist);
+            }
+            catch { return (0, 0, 0); }
+        }
+
+        private double ResolvePointValue()
+        {
+            try
+            {
+                if (this.Symbol == null) return 0;
+                double tick = this.Symbol.TickSize;
+                if (tick <= 0) return 0;
+                string[] candidates = new[] { "TickCost", "TickValue", "PointValue", "ContractMultiplier", "Multiplier" };
+                foreach (var name in candidates)
+                {
+                    try
+                    {
+                        var prop = this.Symbol.GetType().GetProperty(name);
+                        if (prop == null) continue;
+                        object val = prop.GetValue(this.Symbol);
+                        if (val == null) continue;
+                        double num = Convert.ToDouble(val);
+                        if (num <= 0) continue;
+                        if (name == "TickCost" || name == "TickValue") return num / tick;
+                        return num;
+                    }
+                    catch { }
+                }
+                // MNQ fallback: $0.50/tick → $2.00/point
+                if (this.Symbol.Name?.StartsWith("MNQ") == true) return 2.0;
+                return 0;
+            }
+            catch { return 0; }
         }
 
         private void DrawClusters(Graphics gr, dynamic win)
@@ -558,17 +644,17 @@ namespace GlobexTrap
                 var b = GetBar(data, i); if (b == null) break;
                 if (isDemand)
                 {
-                    if (double.IsNaN(ext) || b.High > ext) ext = b.High;
+                    if (double.IsNaN(ext) || b.Close > ext) ext = b.Close;
                     if (b.Close < bb.Close - rng) break;
                 }
                 else
                 {
-                    if (double.IsNaN(ext) || b.Low < ext) ext = b.Low;
+                    if (double.IsNaN(ext) || b.Close < ext) ext = b.Close;
                     if (b.Close > bb.Close + rng) break;
                 }
             }
             if (double.IsNaN(ext)) return 0;
-            return isDemand ? (ext - bb.High) : (bb.Low - ext);
+            return isDemand ? (ext - bb.Close) : (bb.Close - ext);
         }
 
         private static bool IsDuplicate(List<Zone> existing, Zone candidate)
