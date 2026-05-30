@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>TradePhantoms_IOF_v2</AssemblyName>
+    <RootNamespace>TradePhantoms_IOF_v2</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>./bin/Release/</OutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <!-- Exclude standalone indicators, old versions, and subdirectories -->
+  <ItemGroup>
+    <Compile Remove="IOF_GlobexTrap.cs" />
+    <Compile Remove="IOF_ZoneOnly.cs" />
+    <Compile Remove="VIX_PositionGuard.cs" />
+    <Compile Remove="VolumeSpike_IOF.cs" />
+    <Compile Remove="TradePhantoms_IOF_v2_brandon_v3.2.0.cs" />
+    <Compile Remove="v2_0/**" />
+    <Compile Remove="GlobexTrap/**" />
+    <Compile Remove="ZVP_standalone/**" />
+    <Compile Remove="iof_agent/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>refs/TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

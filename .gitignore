@@ -1,0 +1,5 @@
+bin/
+obj/
+*.user
+.vs/
+# Track refs/TradingPlatform.BusinessLayer.dll explicitly — do NOT ignore it
