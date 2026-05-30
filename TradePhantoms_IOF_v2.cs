@@ -537,7 +537,7 @@ namespace TradePhantomsIOF
         private static readonly JsonSerializerOptions _bridgeJsonOptions =
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
         private System.Threading.Timer _bridgeHeartbeatTimer;
-        private string _indicatorVersion = "v2.1.3-tp-entries";
+        private string _indicatorVersion = "v2.1.4-tp-entries";
 
         // 2026-05-09 — Auto-spawn guard. Quantower loads the indicator once
         // per chart but the AppDomain is shared, so this static flag stops
@@ -729,6 +729,8 @@ namespace TradePhantomsIOF
             this.atrCache = null;
             this.dailyAtrCache = null;
             this.lastProcessedBarCount = -1;
+            _resolvedPointValueCache = 0;
+            _resolvedPointValueLogged = false;
 
             // Build pens.
             DisposePens();

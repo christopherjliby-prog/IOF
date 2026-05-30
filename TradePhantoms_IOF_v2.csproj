@@ -24,6 +24,7 @@
     <Compile Remove="GlobexTrap/**" />
     <Compile Remove="ZVP_standalone/**" />
     <Compile Remove="iof_agent/**" />
+    <Compile Remove="VolumeSpike/**" />
   </ItemGroup>
 
   <ItemGroup>
