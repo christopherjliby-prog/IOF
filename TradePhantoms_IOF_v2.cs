@@ -1841,6 +1841,8 @@ namespace TradePhantomsIOF
             // gaps and event misattribution. See iof_audit_CONTRACTS.md.
             _observerHelloEmitted = false;
             System.Threading.Interlocked.Exchange(ref _observerEventSeq, 0);
+            _resolvedPointValueCache = 0;
+            _resolvedPointValueLogged = false;
 
             if (this.Symbol != null)
             {
