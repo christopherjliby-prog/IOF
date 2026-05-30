@@ -2992,10 +2992,10 @@ namespace TradePhantomsIOF
         //   - ComputeContracts returns <= 0 (DollarRiskPerTrade too small for
         //     this zone's stop distance)
         // ---------------------------------------------------------------------
-        private (int Contracts, double DollarRisk) ComputeSizing(IofZone z, double tickSize, double pointValue)
+        private (int Contracts, double DollarRisk, double SlDist) ComputeSizing(IofZone z, double tickSize, double pointValue)
         {
-            if (z == null) return (0, 0);
-            if (tickSize <= 0 || pointValue <= 0) return (0, 0);
+            if (z == null) return (0, 0, 0);
+            if (tickSize <= 0 || pointValue <= 0) return (0, 0, 0);
             try
             {
                 bool isDemand = (z.Type == ZoneType.RBR || z.Type == ZoneType.DBR);
@@ -3005,16 +3005,16 @@ namespace TradePhantomsIOF
                 double sl = TradePhantomsIOF.EntryTPMath.ComputeOrigSL(
                     isDemand, z.WickHi, z.WickLo, tickSize, this.StopBufferTicks);
                 double slDist = TradePhantomsIOF.EntryTPMath.ComputeSlDistance(entry, sl);
-                if (slDist <= 0) return (0, 0);
+                if (slDist <= 0) return (0, 0, 0);
 
                 int contracts = TradePhantomsIOF.EntryTPMath.ComputeContracts(
                     this.DollarRiskPerTrade, slDist, pointValue, this.MaxContracts);
-                if (contracts <= 0) return (0, 0);
-                return (contracts, this.DollarRiskPerTrade);
+                if (contracts <= 0) return (0, 0, 0);
+                return (contracts, this.DollarRiskPerTrade, slDist);
             }
             catch
             {
-                return (0, 0);
+                return (0, 0, 0);
             }
         }
 
@@ -3135,6 +3135,7 @@ namespace TradePhantomsIOF
                         var sizing = ComputeSizing(z, tickSize, pointValue);
                         zContracts = sizing.Contracts;
                         zDollarRisk = sizing.DollarRisk;
+                        _ = sizing.SlDist; // suppress unused warning
                     }
                     catch { /* fall through with zeroes */ }
 
@@ -5656,6 +5657,12 @@ namespace TradePhantomsIOF
                             // Skipped when NaN target or zero risk.
                             if (!double.IsNaN(z.EstimatedRrr) && z.EstimatedRrr > 0)
                                 label += $" · 1:{z.EstimatedRrr:0.#}";
+
+                            if (this.TrailStopPct > 0 && tickSizeLbl > 0 && sizing.SlDist > 0)
+                            {
+                                int tsTicks = (int)Math.Round(sizing.SlDist / tickSizeLbl * this.TrailStopPct);
+                                if (tsTicks > 0) label += $" · TS:{tsTicks}t";
+                            }
                         }
                         catch { /* defensive — never block drawing */ }
                     }
