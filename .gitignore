@@ -2,4 +2,6 @@ bin/
 obj/
 *.user
 .vs/
+# Built output zips — delivered via Drive, not tracked in git
+TradePhantoms_IOF_v2_FULL_INDICATOR_*.zip
 # Track refs/TradingPlatform.BusinessLayer.dll explicitly — do NOT ignore it
