@@ -783,6 +783,7 @@ namespace TradePhantomsIOF
             this.lastProcessedBarCount = -1;
             _resolvedPointValueCache = 0;
             _resolvedPointValueLogged = false;
+            lock (_hvnLock) { _hvnPrices.Clear(); _hvnProfile.Clear(); }
 
             // Build pens.
             DisposePens();
@@ -1898,6 +1899,7 @@ namespace TradePhantomsIOF
             System.Threading.Interlocked.Exchange(ref _observerEventSeq, 0);
             _resolvedPointValueCache = 0;
             _resolvedPointValueLogged = false;
+            lock (_hvnLock) { _hvnPrices.Clear(); _hvnProfile.Clear(); }
 
             if (this.Symbol != null)
             {
@@ -5466,6 +5468,9 @@ namespace TradePhantomsIOF
                 using (var labelBg       = new SolidBrush(Color.FromArgb(180, 0, 0, 0)))
                 using (var labelFg       = new SolidBrush(Color.White))
                 {
+                    if (ShowVolumeHeatmap)
+                        DrawHeatmap(gr, mainWindow);
+
                     DrawZones(gr, mainWindow, zoneLabelFont, labelBg, labelFg);
 
                     // MTF zones (if enabled) — drawn beneath the chart-TF
@@ -5861,8 +5866,9 @@ namespace TradePhantomsIOF
                     // redundant with the zone's color (green/red). Base count
                     // and other deficits are now encoded only when they cost
                     // points — see BuildInfractionLabel below for the scheme.
+                    string hvnTag  = (RequireHvnConfluence || ShowVolumeHeatmap) && IsZoneNearHvn(z) ? " ★HVN" : "";
                     string mtfcTag = z.MtfcBonus > 0 ? $" +M{z.MtfcBonus:0.#}" : "";
-                    string label = BuildInfractionLabel(z, mtfcTag);
+                    string label = BuildInfractionLabel(z, mtfcTag + hvnTag);
                     // 2026-05-13: pre-arm tag — clearest text confirmation
                     // that this is the zone PASS C will arm next when price
                     // retraces (per OnlyArmClosestPerDirection rule).
