@@ -349,6 +349,53 @@ namespace TradePhantomsIOF
         public Color MTFCOverlapItfHtfColor = Color.FromArgb(180, 230, 60, 60);
 
         // ---------------------------------------------------------------------
+        // INPUTS — MTFC Preset + HVN confluence filter
+        // ---------------------------------------------------------------------
+        // MtfcPresetIndex selects which 3-TF stack to use for MTFC detection.
+        // When not 0 (Manual), it overrides ITFPeriod / HTFPeriod automatically.
+        //   0 = Manual      — use ITFPeriod / HTFPeriod settings above
+        //   1 = 15s/1m/5m   — scalping stack
+        //   2 = 1m/5m/15m   — fast intraday
+        //   3 = 5m/15m/1h   — standard execution (default)
+        //   4 = 15m/1h/4h   — swing entry
+        //   5 = 1h/4h/Daily — position / macro
+        [InputParameter("MTFC preset (0=Manual 1=15s/1m/5m 2=1m/5m/15m 3=5m/15m/1h 4=15m/1h/4h 5=1h/4h/Daily)", 91, 0, 5, 1, 0)]
+        public int MtfcPresetIndex = 3;
+
+        [InputParameter("Require MTFC confluence (only show zones in ITF+HTF overlap)", 92)]
+        public bool RequireMtfcConfluence = false;
+
+        [InputParameter("Require HVN confluence (only show zones on a High Volume Node)", 93)]
+        public bool RequireHvnConfluence = false;
+
+        [InputParameter("HVN: spike threshold % above avg", 94, 101, 2000, 10, 0)]
+        public int HvnThresholdPct = 150;
+
+        [InputParameter("HVN: surrounding levels (N each side)", 95, 2, 30, 1, 0)]
+        public int HvnSurroundingN = 5;
+
+        [InputParameter("HVN: lookback bars", 96, 50, 5000, 50, 0)]
+        public int HvnLookbackBars = 500;
+
+        [InputParameter("HVN: bucket size (ticks)", 97, 1, 20, 1, 0)]
+        public int HvnBucketTicks = 4;
+
+        [InputParameter("HVN: zone proximity (ticks)", 98, 1, 100, 1, 0)]
+        public int HvnProximityTicks = 8;
+
+        // ---------------------------------------------------------------------
+        // INPUTS — Volume heatmap panel
+        // ---------------------------------------------------------------------
+        [InputParameter("Show volume heatmap", 99)]
+        public bool ShowVolumeHeatmap = false;
+
+        [InputParameter("Heatmap width (px)", 100, 20, 300, 10, 0)]
+        public int HeatmapWidthPx = 80;
+
+        [InputParameter("Heatmap opacity (0-255)", 101, 20, 255, 5, 0)]
+        public int HeatmapOpacity = 150;
+
+        // ---------------------------------------------------------------------
         // INPUTS — Alerts
         // ---------------------------------------------------------------------
         [InputParameter("Enable alerts", 70)]
@@ -537,7 +584,7 @@ namespace TradePhantomsIOF
         private static readonly JsonSerializerOptions _bridgeJsonOptions =
             new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
         private System.Threading.Timer _bridgeHeartbeatTimer;
-        private string _indicatorVersion = "v2.1.4-tp-entries";
+        private string _indicatorVersion = "v2.2.0-hvn-mtfc";
 
         // 2026-05-09 — Auto-spawn guard. Quantower loads the indicator once
         // per chart but the AppDomain is shared, so this static flag stops
@@ -645,6 +692,11 @@ namespace TradePhantomsIOF
         // boxes. These reflect "an ITF zone sits inside an HTF zone" —
         // higher-tier confluence than the chart-TF/ITF agreement.
         private List<TPMTF.MTFCOverlap> itfHtfOverlaps    = new List<TPMTF.MTFCOverlap>();
+
+        // HVN detection state (built-in bar-based volume profile)
+        private HashSet<double>                     _hvnPrices  = new HashSet<double>();
+        private List<(double Price, double Volume)> _hvnProfile = new List<(double Price, double Volume)>();
+        private readonly object _hvnLock = new object();
 
         // Cache of zone IDs we've already alerted on (so we only fire once per
         // detection, not on every rescan).
@@ -825,9 +877,9 @@ namespace TradePhantomsIOF
                 try
                 {
                     this.itfData = TPMTF.MultiTFZoneScanner.FetchTimeframeData(
-                        this.Symbol, this.ITFPeriod, this.MTFLookbackBars);
+                        this.Symbol, EffectiveITFPeriod, this.MTFLookbackBars);
                     this.htfData = TPMTF.MultiTFZoneScanner.FetchTimeframeData(
-                        this.Symbol, this.HTFPeriod, this.MTFLookbackBars);
+                        this.Symbol, EffectiveHTFPeriod, this.MTFLookbackBars);
                 }
                 catch (Exception ex)
                 {
@@ -862,7 +914,7 @@ namespace TradePhantomsIOF
                 try
                 {
                     this.itfTrendHistory = this.Symbol.GetHistory(
-                        this.ITFPeriod,
+                        EffectiveITFPeriod,
                         this.Symbol.HistoryType,
                         Core.TimeUtils.DateTimeUtcNow.AddDays(-30));
                 }
@@ -1202,6 +1254,9 @@ namespace TradePhantomsIOF
                     RescanMTFZones();
                 }
 
+                if (this.RequireHvnConfluence || this.ShowVolumeHeatmap)
+                    RebuildHvn();
+
                 ScanZones();
 
                 if (this.UseLifecycle && this.lifecycleManager != null)
@@ -1367,9 +1422,9 @@ namespace TradePhantomsIOF
                 try
                 {
                     this.itfData = TPMTF.MultiTFZoneScanner.FetchTimeframeData(
-                        this.Symbol, this.ITFPeriod, this.MTFLookbackBars);
+                        this.Symbol, EffectiveITFPeriod, this.MTFLookbackBars);
                     this.htfData = TPMTF.MultiTFZoneScanner.FetchTimeframeData(
-                        this.Symbol, this.HTFPeriod, this.MTFLookbackBars);
+                        this.Symbol, EffectiveHTFPeriod, this.MTFLookbackBars);
                 }
                 catch (Exception ex)
                 {
@@ -1421,7 +1476,7 @@ namespace TradePhantomsIOF
                 try
                 {
                     this.itfTrendHistory = this.Symbol.GetHistory(
-                        this.ITFPeriod,
+                        EffectiveITFPeriod,
                         this.Symbol.HistoryType,
                         Core.TimeUtils.DateTimeUtcNow.AddDays(-30));
                 }
@@ -4125,6 +4180,183 @@ namespace TradePhantomsIOF
         // Quantower SDK fix: HistoricalData has no .Period; the period lives on
         // the Aggregation object (only on time-based aggregations). Returns null
         // if the chart uses tick / range / non-time aggregation.
+        // Returns effective ITF/HTF periods — preset overrides manual settings.
+        private Period EffectiveITFPeriod
+        {
+            get
+            {
+                switch (MtfcPresetIndex)
+                {
+                    case 1: return Period.MIN1;
+                    case 2: return Period.MIN5;
+                    case 3: return Period.MIN15;
+                    case 4: return Period.HOUR1;
+                    case 5: return Period.HOUR4;
+                    default: return this.ITFPeriod;
+                }
+            }
+        }
+
+        private Period EffectiveHTFPeriod
+        {
+            get
+            {
+                switch (MtfcPresetIndex)
+                {
+                    case 1: return Period.MIN5;
+                    case 2: return Period.MIN15;
+                    case 3: return Period.HOUR1;
+                    case 4: return Period.HOUR4;
+                    case 5: return Period.DAY1;
+                    default: return this.HTFPeriod;
+                }
+            }
+        }
+
+        // ── HVN: bar-based volume profile + spike detection ──────────────────
+        private void RebuildHvn()
+        {
+            if (this.HistoricalData == null || this.Symbol == null) return;
+            try
+            {
+                double tick = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+                double bucketSize = HvnBucketTicks * tick;
+                if (bucketSize <= 0) return;
+
+                var buckets = new Dictionary<int, double>();
+                int total = this.HistoricalData.Count;
+                int start = Math.Max(0, total - HvnLookbackBars);
+
+                for (int i = start; i < total; i++)
+                {
+                    var bar = this.HistoricalData[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (bar == null || bar.Volume <= 0) continue;
+                    double volPer = bar.Volume / 4.0;
+                    foreach (double px in new[] { bar.Open, bar.High, bar.Low, bar.Close })
+                    {
+                        int b = (int)Math.Round(px / bucketSize);
+                        if (!buckets.ContainsKey(b)) buckets[b] = 0;
+                        buckets[b] += volPer;
+                    }
+                }
+
+                var profile = buckets
+                    .Select(kv => (Price: kv.Key * bucketSize, Volume: kv.Value))
+                    .OrderBy(p => p.Price)
+                    .ToList();
+
+                int n = HvnSurroundingN;
+                var newHvn = new HashSet<double>();
+
+                for (int i = n; i < profile.Count - n; i++)
+                {
+                    double cv = profile[i].Volume;
+                    double sum = 0;
+                    for (int j = i - n; j <= i + n; j++)
+                        if (j != i) sum += profile[j].Volume;
+                    double avg = sum / (n * 2);
+                    if (avg <= 0) continue;
+                    if (cv / avg * 100.0 >= HvnThresholdPct)
+                        newHvn.Add(profile[i].Price);
+                }
+
+                lock (_hvnLock)
+                {
+                    _hvnPrices = newHvn;
+                    _hvnProfile.Clear();
+                    _hvnProfile.AddRange(profile);
+                }
+            }
+            catch { }
+        }
+
+        private bool IsZoneNearHvn(IofZone z)
+        {
+            double tick = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+            double tol  = HvnProximityTicks * tick;
+            lock (_hvnLock)
+            {
+                foreach (var hvn in _hvnPrices)
+                {
+                    if (hvn >= z.Bottom - tol && hvn <= z.Top + tol)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        private void DrawHeatmap(Graphics gr, object mainWindowObj)
+        {
+            List<(double Price, double Volume)> profileSnap;
+            lock (_hvnLock) profileSnap = new List<(double Price, double Volume)>(_hvnProfile);
+            if (profileSnap.Count < 2) return;
+
+            double maxVol = 0;
+            foreach (var p in profileSnap) if (p.Volume > maxVol) maxVol = p.Volume;
+            if (maxVol <= 0) return;
+
+            var win  = this.CurrentChart.MainWindow;
+            var rect = (System.Drawing.Rectangle)win.ClientRectangle;
+            int panelLeft = rect.Right - HeatmapWidthPx;
+
+            try
+            {
+                using (var bgBrush = new SolidBrush(Color.FromArgb(40, 0, 0, 0)))
+                    gr.FillRectangle(bgBrush, panelLeft, rect.Top, HeatmapWidthPx, rect.Height);
+
+                for (int i = 0; i < profileSnap.Count; i++)
+                {
+                    int y;
+                    try { y = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(profileSnap[i].Price)); }
+                    catch { continue; }
+                    if (y < rect.Top || y > rect.Bottom) continue;
+
+                    int yTop, yBot;
+                    if (i < profileSnap.Count - 1)
+                    {
+                        int yNext;
+                        try { yNext = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(profileSnap[i + 1].Price)); }
+                        catch { yNext = y - 2; }
+                        yTop = (y + yNext) / 2;
+                    }
+                    else yTop = y - 1;
+
+                    if (i > 0)
+                    {
+                        int yPrev;
+                        try { yPrev = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(profileSnap[i - 1].Price)); }
+                        catch { yPrev = y + 2; }
+                        yBot = (y + yPrev) / 2;
+                    }
+                    else yBot = y + 1;
+
+                    if (yTop > yBot) { int tmp = yTop; yTop = yBot; yBot = tmp; }
+                    int rowH = Math.Max(1, yBot - yTop);
+
+                    double t    = profileSnap[i].Volume / maxVol;
+                    int    barW = Math.Max(1, (int)Math.Round(t * HeatmapWidthPx));
+
+                    using (var brush = new SolidBrush(HvnHeatColor(t, HeatmapOpacity)))
+                        gr.FillRectangle(brush, rect.Right - barW, yTop, barW, rowH);
+                }
+
+                using (var sepPen = new Pen(Color.FromArgb(60, 255, 255, 255), 1))
+                    gr.DrawLine(sepPen, panelLeft, rect.Top, panelLeft, rect.Bottom);
+            }
+            catch { }
+        }
+
+        private static Color HvnHeatColor(double t, int alpha)
+        {
+            t = Math.Max(0, Math.Min(1, t));
+            int r, g, b;
+            if (t < 0.25)      { double s = t / 0.25;        r = 0;                    g = (int)(s * 80);           b = (int)(160 + s * 95); }
+            else if (t < 0.5)  { double s = (t - 0.25)/0.25; r = 0;                    g = (int)(80 + s * 175);     b = (int)(255 - s * 255); }
+            else if (t < 0.75) { double s = (t - 0.5) /0.25; r = (int)(s * 255);       g = 255;                     b = 0; }
+            else               { double s = (t - 0.75)/0.25; r = 255;                   g = (int)(255 - s * 255);    b = 0; }
+            return Color.FromArgb(alpha, r, g, b);
+        }
+
         private Period? GetChartPeriod()
         {
             try
