@@ -396,6 +396,21 @@ namespace TradePhantomsIOF
         public int HeatmapOpacity = 150;
 
         // ---------------------------------------------------------------------
+        // INPUTS — Departure strength + base absorption filters
+        // ---------------------------------------------------------------------
+        [InputParameter("Require departure strength", 102)]
+        public bool RequireDepartureStrength = false;
+
+        [InputParameter("Departure volume multiplier min (× avg bar vol)", 103, 1.0, 10.0, 0.5, 1)]
+        public double DepartureMultiplierMin = 2.0;
+
+        [InputParameter("Require base absorption", 104)]
+        public bool RequireBaseAbsorption = false;
+
+        [InputParameter("Absorption multiplier min (vol/range × avg)", 105, 1.0, 10.0, 0.5, 1)]
+        public double AbsorptionMultiplierMin = 2.0;
+
+        // ---------------------------------------------------------------------
         // INPUTS — Alerts
         // ---------------------------------------------------------------------
         [InputParameter("Enable alerts", 70)]
@@ -698,6 +713,15 @@ namespace TradePhantomsIOF
         private List<(double Price, double Volume)> _hvnProfile = new List<(double Price, double Volume)>();
         private readonly object _hvnLock = new object();
 
+        // Departure strength + base absorption metrics, cached per zone ID
+        private struct ZoneMetrics
+        {
+            public double DepartureMultiplier;
+            public double AbsorptionMultiplier;
+            public bool   Computed;
+        }
+        private readonly Dictionary<string, ZoneMetrics> _zoneMetrics = new Dictionary<string, ZoneMetrics>();
+
         // Cache of zone IDs we've already alerted on (so we only fire once per
         // detection, not on every rescan).
         private readonly HashSet<string> alertedZoneIds = new HashSet<string>();
@@ -784,6 +808,7 @@ namespace TradePhantomsIOF
             _resolvedPointValueCache = 0;
             _resolvedPointValueLogged = false;
             lock (_hvnLock) { _hvnPrices.Clear(); _hvnProfile.Clear(); }
+            _zoneMetrics.Clear();
 
             // Build pens.
             DisposePens();
@@ -1900,6 +1925,7 @@ namespace TradePhantomsIOF
             _resolvedPointValueCache = 0;
             _resolvedPointValueLogged = false;
             lock (_hvnLock) { _hvnPrices.Clear(); _hvnProfile.Clear(); }
+            _zoneMetrics.Clear();
 
             if (this.Symbol != null)
             {
@@ -4182,6 +4208,78 @@ namespace TradePhantomsIOF
         // Quantower SDK fix: HistoricalData has no .Period; the period lives on
         // the Aggregation object (only on time-based aggregations). Returns null
         // if the chart uses tick / range / non-time aggregation.
+        // ── Departure strength + base absorption ────────────────────────────────
+        private ZoneMetrics ComputeZoneMetrics(IofZone z, bool isDemand)
+        {
+            var result = new ZoneMetrics { Computed = true };
+            if (this.HistoricalData == null || this.Symbol == null) return result;
+            try
+            {
+                int    total = this.HistoricalData.Count;
+                double tick  = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+
+                // Find bar index whose TimeLeft is <= zone start time (scan newest→oldest)
+                int zoneIdx = -1;
+                for (int i = total - 1; i >= Math.Max(0, total - HvnLookbackBars); i--)
+                {
+                    var b = this.HistoricalData[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (b == null) continue;
+                    if (b.TimeLeft <= z.StartTime) { zoneIdx = i; break; }
+                }
+                if (zoneIdx < 0) return result;
+
+                // Rolling average volume + vol/range over 50 bars before the zone
+                double sumVol = 0, sumVPR = 0; int avgN = 0;
+                for (int i = Math.Max(0, zoneIdx - 50); i < zoneIdx; i++)
+                {
+                    var b = this.HistoricalData[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (b == null || b.Volume <= 0) continue;
+                    sumVol += b.Volume;
+                    double rng = b.High - b.Low;
+                    if (rng > tick) sumVPR += b.Volume / rng;
+                    avgN++;
+                }
+                if (avgN == 0 || sumVol <= 0) return result;
+                double avgVol = sumVol / avgN;
+                double avgVPR = sumVPR / avgN;
+
+                // Classify bars from zone start: base (price within zone) vs. departure (past zone edge)
+                double baseVPR = 0; int baseN = 0;
+                double deptVol = 0; int deptN = 0;
+                bool   pastBase = false;
+
+                for (int i = zoneIdx; i < Math.Min(total, zoneIdx + 30); i++)
+                {
+                    var b = this.HistoricalData[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (b == null || b.Volume <= 0) continue;
+
+                    bool inZone  = b.Low  <= z.Top    + tick * 4
+                                && b.High >= z.Bottom - tick * 4
+                                && b.High <= z.Top    + tick * 4
+                                && b.Low  >= z.Bottom - tick * 4;
+                    bool departs = isDemand ? b.Close > z.Top    + tick
+                                           : b.Close < z.Bottom - tick;
+
+                    if (inZone && !pastBase)
+                    {
+                        double rng = b.High - b.Low;
+                        if (rng > tick) { baseVPR += b.Volume / rng; baseN++; }
+                    }
+                    else if (departs)
+                    {
+                        pastBase = true;
+                        deptVol += b.Volume;
+                        if (++deptN >= 5) break;
+                    }
+                }
+
+                if (avgVPR > 0 && baseN > 0) result.AbsorptionMultiplier = (baseVPR / baseN) / avgVPR;
+                if (avgVol > 0 && deptN > 0)  result.DepartureMultiplier  = (deptVol / deptN) / avgVol;
+            }
+            catch { }
+            return result;
+        }
+
         // Returns effective ITF/HTF periods — preset overrides manual settings.
         private Period EffectiveITFPeriod
         {
@@ -5787,6 +5885,21 @@ namespace TradePhantomsIOF
                 if (z.Invalidated) continue;
 
                 bool isDemand = z.Type == ZoneType.RBR || z.Type == ZoneType.DBR;
+
+                // Confluence filters — all default OFF; existing behavior preserved.
+                if (RequireMtfcConfluence && z.MtfcBonus <= 0) continue;
+                if (RequireHvnConfluence  && !IsZoneNearHvn(z)) continue;
+                if (RequireDepartureStrength || RequireBaseAbsorption)
+                {
+                    if (!_zoneMetrics.TryGetValue(z.Id, out var zm) || !zm.Computed)
+                    {
+                        zm = ComputeZoneMetrics(z, isDemand);
+                        _zoneMetrics[z.Id] = zm;
+                    }
+                    if (RequireDepartureStrength && zm.DepartureMultiplier < DepartureMultiplierMin) continue;
+                    if (RequireBaseAbsorption   && zm.AbsorptionMultiplier < AbsorptionMultiplierMin) continue;
+                }
+
                 Color baseColor = isDemand ? DemandColor : SupplyColor;
 
                 // Tradeable: score >= MinScore. Below = informational only
@@ -5868,7 +5981,13 @@ namespace TradePhantomsIOF
                     // points — see BuildInfractionLabel below for the scheme.
                     string hvnTag  = (RequireHvnConfluence || ShowVolumeHeatmap) && IsZoneNearHvn(z) ? " ★HVN" : "";
                     string mtfcTag = z.MtfcBonus > 0 ? $" +M{z.MtfcBonus:0.#}" : "";
-                    string label = BuildInfractionLabel(z, mtfcTag + hvnTag);
+                    string depsTag = "";
+                    if (_zoneMetrics.TryGetValue(z.Id, out var zmL) && zmL.Computed)
+                    {
+                        if (zmL.DepartureMultiplier  > 0) depsTag += $" D:{zmL.DepartureMultiplier:0.#}×";
+                        if (zmL.AbsorptionMultiplier > 0) depsTag += $" ABS:{zmL.AbsorptionMultiplier:0.#}×";
+                    }
+                    string label = BuildInfractionLabel(z, mtfcTag + hvnTag + depsTag);
                     // 2026-05-13: pre-arm tag — clearest text confirmation
                     // that this is the zone PASS C will arm next when price
                     // retraces (per OnlyArmClosestPerDirection rule).
