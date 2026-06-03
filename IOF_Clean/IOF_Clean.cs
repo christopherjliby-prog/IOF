@@ -1,17 +1,7 @@
 // =============================================================================
 // IOF_Clean.cs — Standalone supply/demand zone detector + position sizer
-// =============================================================================
-// Self-contained. No IOF v2 dependency. No GetPrice() — uses HistoricalData
-// directly, same as VolumeSpike (confirmed working in Quantower scripting).
-//
-// Zone detection:
-//   Scans for small base candles followed by a strong departure move.
-//   Classifies: RBR / DBR (demand) or RBD / DBD (supply).
-//   Draws clean semi-transparent boxes. Fades tested zones.
-//
-// Sizing panel:
-//   Appears when price is within ZoneProximityTicks of a zone.
-//   Shows: direction, contracts, stop price, tick distance, dollar risk.
+// Detection algorithm is a direct port of MultiTFZoneScanner.ScanTimeframe
+// from TradePhantoms IOF v2. No v2 runtime dependency.
 // =============================================================================
 
 using System;
@@ -35,25 +25,29 @@ namespace TradePhantoms
         [InputParameter("Stop Buffer Ticks (past zone edge)", 2, 1, 30, 1, 0)]
         public int StopBufferTicks = 4;
 
-        [InputParameter("Base Max Range Ticks", 3, 3, 200, 1, 0)]
-        public int BaseMaxRangeTicks = 25;
+        // -- Zone detection (matches v2 defaults) --
+        [InputParameter("Base Candle Body % Max (0.1-0.9)", 3, 0.1, 0.9, 0.05, 2)]
+        public double BaseCandleBodyPct = 0.5;
 
-        [InputParameter("Departure Multiplier (x base)", 4, 1.0, 10.0, 0.5, 1)]
-        public double DepartureMultiplier = 1.5;
+        [InputParameter("Min Impulse Ratio (x base height)", 4, 0.5, 10.0, 0.5, 1)]
+        public double MinImpulseRatio = 2.0;
 
-        [InputParameter("Lookback Bars", 5, 20, 1000, 25, 0)]
+        [InputParameter("Max Base Candles (1-7)", 5, 1, 7, 1, 0)]
+        public int MaxBaseCandles = 3;
+
+        [InputParameter("Lookback Bars", 6, 20, 1000, 25, 0)]
         public int LookbackBars = 150;
 
-        [InputParameter("Max Zones Per Side", 6, 1, 10, 1, 0)]
+        [InputParameter("Max Zones Per Side", 7, 1, 10, 1, 0)]
         public int MaxZones = 5;
 
-        [InputParameter("Zone Proximity Ticks (show panel)", 7, 1, 150, 1, 0)]
+        [InputParameter("Zone Proximity Ticks (show panel)", 8, 1, 150, 1, 0)]
         public int ZoneProximityTicks = 20;
 
-        [InputParameter("Zone Fill Opacity (0-255)", 8, 5, 200, 5, 0)]
+        [InputParameter("Zone Fill Opacity (0-255)", 9, 5, 200, 5, 0)]
         public int ZoneOpacity = 40;
 
-        [InputParameter("Show Zone Labels", 9)]
+        [InputParameter("Show Zone Labels", 10)]
         public bool ShowLabels = true;
 
         // ── Internal ──────────────────────────────────────────────────────────
@@ -70,8 +64,9 @@ namespace TradePhantoms
 
         private class ZoneBox
         {
-            public double Top;
-            public double Bottom;
+            public double Top;       // drawn top  (demand=BodyHi, supply=WickHi)
+            public double Bottom;    // drawn bot  (demand=WickLo, supply=BodyLo)
+            public double WickEdge;  // invalidation level (demand=WickLo, supply=WickHi)
             public ZType  Type;
             public bool   IsDemand;
             public int    Touches;
@@ -82,7 +77,7 @@ namespace TradePhantoms
         public IOF_Clean()
         {
             Name           = "IOF Clean";
-            Description    = "Standalone supply/demand zones + contract sizer.";
+            Description    = "Standalone supply/demand zones + contract sizer. Same detection as IOF v2.";
             SeparateWindow = false;
             AddLineSeries("Clean_anchor", Color.Transparent, 1, LineStyle.Solid);
         }
@@ -105,130 +100,228 @@ namespace TradePhantoms
             ScanZones();
         }
 
-        // ── Zone scan ─────────────────────────────────────────────────────────
+        // ── Zone scan — direct port of MultiTFZoneScanner.ScanTimeframe ───────
 
         private void ScanZones()
         {
-            int    total    = this.HistoricalData.Count;
-            int    lookback = Math.Min(LookbackBars, total - 3);
-            double tick     = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
-            double baseMax  = BaseMaxRangeTicks * tick;
+            var data      = this.HistoricalData;
+            int total     = data.Count;
+            double tick   = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
 
-            // current price = close of most recent bar
-            var curBar = this.HistoricalData[total - 1, SeekOriginHistory.Begin] as HistoryItemBar;
-            if (curBar == null) return;
-            double price = curBar.Close;
+            int lookback  = Math.Min(LookbackBars, total - 4);
+            int firstBar  = Math.Max(2, total - lookback);
 
             var candidates = new List<ZoneBox>();
 
-            // Scan from most recent bar backwards.
-            // idx = base bar index in HistoricalData (0=oldest)
-            // idx+1 = departure bar (more recent, just formed)  ← wait, that's wrong
-            // Let me be explicit:
-            //   For base at absolute index b:
-            //     departure bar = b+1  (one bar newer, closer to current)
-            //     approach bar  = b-1  (one bar older)
-            // So b ranges from 1 to (total-2) to have valid neighbors.
-            // We scan most recent first: b from (total-2) down to (total-1-lookback)
-
-            int scanStart = total - 2;
-            int scanEnd   = Math.Max(1, total - 1 - lookback);
-
-            for (int b = scanStart; b >= scanEnd; b--)
+            // Walk oldest → newest (same as v2).
+            // endIndex = last candle of the base cluster.
+            // The bar at endIndex+1 is the leg-out (impulse).
+            // The bar at startIndex-1 is the leg-in.
+            for (int endIndex = firstBar; endIndex < total - 2; endIndex++)
             {
-                var baseBar = this.HistoricalData[b, SeekOriginHistory.Begin] as HistoryItemBar;
-                if (baseBar == null) continue;
-
-                double baseHi  = baseBar.High;
-                double baseLo  = baseBar.Low;
-                double baseRng = baseHi - baseLo;
-
-                if (baseRng <= 0 || baseRng > baseMax) continue;
-
-                // Departure bar (b+1, more recent — just closed after the base)
-                var depBar = this.HistoricalData[b + 1, SeekOriginHistory.Begin] as HistoryItemBar;
-                if (depBar == null) continue;
-
-                double depRng = depBar.High - depBar.Low;
-                if (depRng < DepartureMultiplier * baseRng) continue;
-
-                bool depBull = depBar.Close > depBar.Open;
-                bool depBear = depBar.Close < depBar.Open;
-                if (!depBull && !depBear) continue;
-
-                bool isDemand = depBull;
-
-                // Zone must sit on correct side of current price
-                if (isDemand  && baseHi >= price) continue;
-                if (!isDemand && baseLo <= price) continue;
-
-                // Approach bar (b-1, older)
-                ZType ztype = ZType.DBR;
-                if (b >= 1)
+                for (int baseLen = 1; baseLen <= MaxBaseCandles; baseLen++)
                 {
-                    var appBar = this.HistoricalData[b - 1, SeekOriginHistory.Begin] as HistoryItemBar;
-                    if (appBar != null)
+                    int startIndex = endIndex - baseLen + 1;
+                    if (startIndex < 1) continue;
+                    if (endIndex + 1 >= total) continue;
+
+                    // Every bar in [startIndex..endIndex] must be a base candle:
+                    // body / range <= BaseCandleBodyPct
+                    if (!IsValidBase(data, startIndex, endIndex)) continue;
+
+                    // Leg-in: bar before the base must be a strong directional candle
+                    LegDir legIn = ClassifyLeg(data, startIndex - 1);
+                    if (legIn == LegDir.None) continue;
+
+                    // Leg-out: bar after the base must also be a strong directional candle
+                    LegDir legOut = ClassifyLeg(data, endIndex + 1);
+                    if (legOut == LegDir.None) continue;
+
+                    // Formation from in+out direction
+                    ZType ztype;
+                    bool  isDemand;
+                    if      (legIn == LegDir.Up   && legOut == LegDir.Up)   { ztype = ZType.RBR; isDemand = true;  }
+                    else if (legIn == LegDir.Down && legOut == LegDir.Up)   { ztype = ZType.DBR; isDemand = true;  }
+                    else if (legIn == LegDir.Up   && legOut == LegDir.Down) { ztype = ZType.RBD; isDemand = false; }
+                    else if (legIn == LegDir.Down && legOut == LegDir.Down) { ztype = ZType.DBD; isDemand = false; }
+                    else continue;
+
+                    // Build asymmetric zone rectangle (same as v2)
+                    double bodyHi = double.MinValue, bodyLo = double.MaxValue;
+                    double wickHi = double.MinValue, wickLo = double.MaxValue;
+                    for (int i = startIndex; i <= endIndex; i++)
                     {
-                        bool appBull = appBar.Close > appBar.Open;
-                        if (isDemand)
-                            ztype = appBull ? ZType.RBR : ZType.DBR;
-                        else
-                            ztype = appBull ? ZType.RBD : ZType.DBD;
+                        var b = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                        if (b == null) goto NextBaseLen;
+                        double bh = Math.Max(b.Open, b.Close);
+                        double bl = Math.Min(b.Open, b.Close);
+                        if (bh > bodyHi) bodyHi = bh;
+                        if (bl < bodyLo) bodyLo = bl;
+                        if (b.High > wickHi) wickHi = b.High;
+                        if (b.Low  < wickLo) wickLo = b.Low;
                     }
+
+                    {
+                        // Demand: top = BodyHi, bottom = WickLo
+                        // Supply: top = WickHi, bottom = BodyLo
+                        double zoneTop    = isDemand ? bodyHi : wickHi;
+                        double zoneBot    = isDemand ? wickLo : bodyLo;
+                        double wickEdge   = isDemand ? wickLo : wickHi;
+                        double baseHeight = zoneTop - zoneBot;
+                        if (baseHeight <= 0) goto NextBaseLen;
+
+                        // Impulse extension from end of base outward must be >=
+                        // MinImpulseRatio * baseHeight (matches v2 MeasureMoveOut)
+                        double moveOut = MeasureMoveOut(data, endIndex, total, isDemand, bodyHi, bodyLo);
+                        if (moveOut < MinImpulseRatio * baseHeight) goto NextBaseLen;
+
+                        // Dedup: Jaccard overlap >= 75% with same-direction candidates
+                        if (IsDuplicate(candidates, isDemand, zoneTop, zoneBot)) goto NextBaseLen;
+
+                        // Count touches after the base
+                        int touches = 0;
+                        for (int j = endIndex + 2; j < total; j++)
+                        {
+                            var jb = data[j, SeekOriginHistory.Begin] as HistoryItemBar;
+                            if (jb != null && jb.High >= zoneBot && jb.Low <= zoneTop)
+                                touches++;
+                        }
+
+                        var z      = new ZoneBox();
+                        z.Top      = zoneTop;
+                        z.Bottom   = zoneBot;
+                        z.WickEdge = wickEdge;
+                        z.Type     = ztype;
+                        z.IsDemand = isDemand;
+                        z.Touches  = touches;
+                        candidates.Add(z);
+                    }
+
+                    NextBaseLen:;
                 }
-
-                // Invalidated: any bar after the base that closed through it
-                bool dead = false;
-                for (int j = b + 2; j < total; j++)
-                {
-                    var jBar = this.HistoricalData[j, SeekOriginHistory.Begin] as HistoryItemBar;
-                    if (jBar == null) continue;
-                    if (isDemand  && jBar.Close < baseLo - tick) { dead = true; break; }
-                    if (!isDemand && jBar.Close > baseHi + tick) { dead = true; break; }
-                }
-                if (dead) continue;
-
-                // Deduplicate
-                bool dup = false;
-                foreach (var ex in candidates)
-                    if (Math.Abs(ex.Top - baseHi) < tick * 3 && Math.Abs(ex.Bottom - baseLo) < tick * 3)
-                    { dup = true; break; }
-                if (dup) continue;
-
-                // Count touches (bars after departure that entered the zone)
-                int touches = 0;
-                for (int j = b + 2; j < total; j++)
-                {
-                    var jBar = this.HistoricalData[j, SeekOriginHistory.Begin] as HistoryItemBar;
-                    if (jBar != null && jBar.High >= baseLo && jBar.Low <= baseHi)
-                        touches++;
-                }
-
-                var z      = new ZoneBox();
-                z.Top      = baseHi;
-                z.Bottom   = baseLo;
-                z.Type     = ztype;
-                z.IsDemand = isDemand;
-                z.Touches  = touches;
-                candidates.Add(z);
             }
 
-            // Keep N closest per side
+            // Invalidate zones where a later bar's close crossed the far wick
+            for (int z = candidates.Count - 1; z >= 0; z--)
+            {
+                var zone = candidates[z];
+                bool dead = false;
+                // find the endIndex of this zone by matching geometry (approximate)
+                // We invalidate by scanning all bars and checking close vs wickEdge
+                for (int i = firstBar; i < total; i++)
+                {
+                    var b = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (b == null) continue;
+                    if (zone.IsDemand && b.Close < zone.WickEdge) { dead = true; break; }
+                    if (!zone.IsDemand && b.Close > zone.WickEdge) { dead = true; break; }
+                }
+                if (dead) candidates.RemoveAt(z);
+            }
+
+            // Keep N closest per side, sorted closest to current price first
+            var curBar2 = data[total - 1, SeekOriginHistory.Begin] as HistoryItemBar;
+            double curPrice = curBar2 != null ? curBar2.Close : 0;
+
             var demand = new List<ZoneBox>();
             var supply = new List<ZoneBox>();
-            foreach (var z in candidates)
+            for (int i = 0; i < candidates.Count; i++)
             {
-                if (z.IsDemand) demand.Add(z);
-                else supply.Add(z);
+                if (candidates[i].IsDemand) demand.Add(candidates[i]);
+                else supply.Add(candidates[i]);
             }
-            demand.Sort((a, b2) => b2.Top.CompareTo(a.Top));         // highest top first
-            supply.Sort((a, b2) => a.Bottom.CompareTo(b2.Bottom));   // lowest bottom first
+
+            // Demand: keep zones below price, sort highest top first (closest)
+            var demandBelow = new List<ZoneBox>();
+            for (int i = 0; i < demand.Count; i++)
+                if (demand[i].Top < curPrice) demandBelow.Add(demand[i]);
+            demandBelow.Sort((a, b2) => b2.Top.CompareTo(a.Top));
+
+            // Supply: keep zones above price, sort lowest bottom first (closest)
+            var supplyAbove = new List<ZoneBox>();
+            for (int i = 0; i < supply.Count; i++)
+                if (supply[i].Bottom > curPrice) supplyAbove.Add(supply[i]);
+            supplyAbove.Sort((a, b2) => a.Bottom.CompareTo(b2.Bottom));
 
             var result = new List<ZoneBox>();
-            for (int i = 0; i < Math.Min(MaxZones, demand.Count); i++) result.Add(demand[i]);
-            for (int i = 0; i < Math.Min(MaxZones, supply.Count); i++) result.Add(supply[i]);
+            for (int i = 0; i < Math.Min(MaxZones, demandBelow.Count); i++) result.Add(demandBelow[i]);
+            for (int i = 0; i < Math.Min(MaxZones, supplyAbove.Count); i++) result.Add(supplyAbove[i]);
 
             lock (_zoneLock) { _zones.Clear(); _zones.AddRange(result); }
+        }
+
+        // ── Detection helpers (same logic as MultiTFZoneScanner) ─────────────
+
+        private enum LegDir { None, Up, Down }
+
+        private bool IsValidBase(HistoricalData data, int start, int end)
+        {
+            for (int i = start; i <= end; i++)
+            {
+                var bar = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                if (bar == null) return false;
+                double range = bar.High - bar.Low;
+                if (range <= 0) return false;
+                double body = Math.Abs(bar.Close - bar.Open);
+                if (body / range > BaseCandleBodyPct) return false;
+            }
+            return true;
+        }
+
+        private LegDir ClassifyLeg(HistoricalData data, int idx)
+        {
+            var bar = data[idx, SeekOriginHistory.Begin] as HistoryItemBar;
+            if (bar == null) return LegDir.None;
+            double range = bar.High - bar.Low;
+            if (range <= 0) return LegDir.None;
+            double body = Math.Abs(bar.Close - bar.Open);
+            if (body / range < BaseCandleBodyPct + 0.05) return LegDir.None;
+            if (bar.Close > bar.Open) return LegDir.Up;
+            if (bar.Close < bar.Open) return LegDir.Down;
+            return LegDir.None;
+        }
+
+        private double MeasureMoveOut(HistoricalData data, int endOfBase, int total,
+                                      bool isDemand, double bodyHi, double bodyLo)
+        {
+            int scanLimit = Math.Min(total - 1, endOfBase + Math.Max(20, LookbackBars / 4));
+            var baseBar   = data[endOfBase, SeekOriginHistory.Begin] as HistoryItemBar;
+            if (baseBar == null) return 0.0;
+            double baseRange = baseBar.High - baseBar.Low;
+            if (baseRange <= 0) baseRange = Math.Abs(baseBar.Close - baseBar.Open);
+
+            double extreme = double.NaN;
+            for (int i = endOfBase + 1; i <= scanLimit; i++)
+            {
+                var b = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
+                if (b == null) break;
+                if (isDemand)
+                {
+                    if (double.IsNaN(extreme) || b.High > extreme) extreme = b.High;
+                    if (b.Close < baseBar.Close - baseRange) break;
+                }
+                else
+                {
+                    if (double.IsNaN(extreme) || b.Low < extreme) extreme = b.Low;
+                    if (b.Close > baseBar.Close + baseRange) break;
+                }
+            }
+            if (double.IsNaN(extreme)) return 0.0;
+            return isDemand ? (extreme - bodyHi) : (bodyLo - extreme);
+        }
+
+        private bool IsDuplicate(List<ZoneBox> existing, bool isDemand, double top, double bot)
+        {
+            for (int i = 0; i < existing.Count; i++)
+            {
+                var z = existing[i];
+                if (z.IsDemand != isDemand) continue;
+                double overlap = Math.Min(z.Top, top) - Math.Max(z.Bottom, bot);
+                if (overlap <= 0) continue;
+                double union = Math.Max(z.Top, top) - Math.Min(z.Bottom, bot);
+                if (union <= 0) continue;
+                if (overlap / union >= 0.75) return true;
+            }
+            return false;
         }
 
         // ── Paint ─────────────────────────────────────────────────────────────
@@ -248,7 +341,6 @@ namespace TradePhantoms
 
             var rect = (Rectangle)win.ClientRectangle;
 
-            // Get current price directly from HistoricalData (safe in OnPaintChart)
             double price = 0;
             try
             {
@@ -292,6 +384,7 @@ namespace TradePhantoms
                     ? Color.FromArgb(180, 0, 230, 100)
                     : Color.FromArgb(180, 255, 80, 80);
 
+                // Edge line on the body side (entry edge)
                 int edgeY = z.IsDemand ? yTop : yBot;
                 using (var ep = new Pen(edge, 1))
                     gr.DrawLine(ep, rect.Left, edgeY, rect.Right, edgeY);
@@ -326,7 +419,7 @@ namespace TradePhantoms
             double riskPerCt = stopDist * ptVal;
             if (riskPerCt <= 0) return;
 
-            int    cts       = (int)Math.Floor(RiskPerTrade / riskPerCt);
+            int    cts    = (int)Math.Floor(RiskPerTrade / riskPerCt);
             cts = Math.Max(1, Math.Min(cts, MaxContracts));
             double totalRisk = cts * riskPerCt;
 
@@ -397,10 +490,10 @@ namespace TradePhantoms
             string root = this.Symbol.Name.TrimEnd("0123456789HMUZ".ToCharArray()).ToUpperInvariant();
             switch (root)
             {
-                case "MNQ": return 2.0;   case "NQ":  return 20.0;
-                case "MES": return 5.0;   case "ES":  return 50.0;
-                case "M2K": return 5.0;   case "RTY": return 50.0;
-                case "MYM": return 0.5;   case "YM":  return 5.0;
+                case "MNQ": return 2.0;    case "NQ":  return 20.0;
+                case "MES": return 5.0;    case "ES":  return 50.0;
+                case "M2K": return 5.0;    case "RTY": return 50.0;
+                case "MYM": return 0.5;    case "YM":  return 5.0;
                 case "CL":  return 1000.0; case "MCL": return 100.0;
                 case "GC":  return 100.0;  case "MGC": return 10.0;
                 default:    return 2.0;
