@@ -5543,6 +5543,8 @@ namespace TradePhantomsIOF
 
                 bool isDemand = z.Type == ZoneType.RBR || z.Type == ZoneType.DBR;
                 Color baseColor = isDemand ? DemandColor : SupplyColor;
+                if (z.MtfcBonus > 0)
+                    baseColor = Color.FromArgb(baseColor.A, 148, 0, 211); // purple for MTFC-overlapping zones
 
                 // Tradeable: score >= MinScore. Below = informational only
                 // (touched/degraded but not invalidated — visible so the
