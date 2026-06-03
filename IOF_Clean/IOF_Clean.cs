@@ -1,25 +1,17 @@
 // =============================================================================
 // IOF_Clean.cs — Standalone supply/demand zone detector + position sizer
 // =============================================================================
-// Self-contained. Does NOT depend on IOF v2 or any other indicator.
+// Self-contained. No IOF v2 dependency. No GetPrice() — uses HistoricalData
+// directly, same as VolumeSpike (confirmed working in Quantower scripting).
 //
 // Zone detection:
-//   Finds base candles (small range) followed by a strong departure move.
-//   Classifies each zone: RBR / DBR (demand) or RBD / DBD (supply).
+//   Scans for small base candles followed by a strong departure move.
+//   Classifies: RBR / DBR (demand) or RBD / DBD (supply).
 //   Draws clean semi-transparent boxes. Fades tested zones.
-//   Invalidates zones when price closes through them.
 //
-// Position sizing:
-//   When price enters or approaches a zone, shows a panel with:
-//     - Direction (LONG / SHORT)
-//     - Contracts to enter based on your risk and stop distance
-//     - Exact stop price, tick distance, and dollar risk
-//
-// Parameters to tune:
-//   Base Max Range Ticks  — how small a candle must be to count as a base
-//   Departure Multiplier  — departure move must be N× the base size
-//   Risk Per Trade ($)    — your max dollar risk per trade
-//   Max Contracts         — hard cap (set to your account's limit)
+// Sizing panel:
+//   Appears when price is within ZoneProximityTicks of a zone.
+//   Shows: direction, contracts, stop price, tick distance, dollar risk.
 // =============================================================================
 
 using System;
@@ -44,31 +36,30 @@ namespace TradePhantoms
         public int StopBufferTicks = 4;
 
         [InputParameter("Base Max Range Ticks", 3, 3, 200, 1, 0)]
-        public int BaseMaxRangeTicks = 20;
+        public int BaseMaxRangeTicks = 25;
 
-        [InputParameter("Departure Multiplier", 4, 1.0, 10.0, 0.5, 1)]
-        public double DepartureMultiplier = 2.0;
+        [InputParameter("Departure Multiplier (x base)", 4, 1.0, 10.0, 0.5, 1)]
+        public double DepartureMultiplier = 1.5;
 
-        [InputParameter("Lookback Bars", 5, 50, 1000, 25, 0)]
-        public int LookbackBars = 200;
+        [InputParameter("Lookback Bars", 5, 20, 1000, 25, 0)]
+        public int LookbackBars = 150;
 
         [InputParameter("Max Zones Per Side", 6, 1, 10, 1, 0)]
-        public int MaxZones = 4;
+        public int MaxZones = 5;
 
         [InputParameter("Zone Proximity Ticks (show panel)", 7, 1, 150, 1, 0)]
-        public int ZoneProximityTicks = 15;
+        public int ZoneProximityTicks = 20;
 
-        [InputParameter("Zone Fill Opacity (0-255)", 8, 5, 255, 5, 0)]
-        public int ZoneOpacity = 35;
+        [InputParameter("Zone Fill Opacity (0-255)", 8, 5, 200, 5, 0)]
+        public int ZoneOpacity = 40;
 
         [InputParameter("Show Zone Labels", 9)]
         public bool ShowLabels = true;
 
-        // ── Internal state ────────────────────────────────────────────────────
+        // ── Internal ──────────────────────────────────────────────────────────
 
         private List<ZoneBox> _zones = new List<ZoneBox>();
         private readonly object _zoneLock = new object();
-        private double _lastPrice;
 
         private Font _fontLabel;
         private Font _fontTitle;
@@ -91,7 +82,7 @@ namespace TradePhantoms
         public IOF_Clean()
         {
             Name           = "IOF Clean";
-            Description    = "Clean supply/demand zones + contract sizer. Standalone — no IOF v2 needed.";
+            Description    = "Standalone supply/demand zones + contract sizer.";
             SeparateWindow = false;
             AddLineSeries("Clean_anchor", Color.Transparent, 1, LineStyle.Solid);
         }
@@ -109,63 +100,91 @@ namespace TradePhantoms
         {
             if (this.Symbol == null) return;
             if (args.Reason != UpdateReason.NewBar && args.Reason != UpdateReason.HistoricalBar) return;
-            if (this.Count < LookbackBars + 3) return;
+            if (this.HistoricalData == null || this.HistoricalData.Count < 5) return;
 
-            _lastPrice = this.GetPrice(PriceType.Close, 0);
             ScanZones();
         }
 
-        // ── Zone detection ────────────────────────────────────────────────────
+        // ── Zone scan ─────────────────────────────────────────────────────────
 
         private void ScanZones()
         {
-            double tick         = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
-            double baseMax      = BaseMaxRangeTicks * tick;
-            double price        = _lastPrice;
-            int    lookback     = Math.Min(LookbackBars, this.Count - 2);
-            var    candidates   = new List<ZoneBox>();
+            int    total    = this.HistoricalData.Count;
+            int    lookback = Math.Min(LookbackBars, total - 3);
+            double tick     = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+            double baseMax  = BaseMaxRangeTicks * tick;
 
-            for (int i = 1; i < lookback; i++)
+            // current price = close of most recent bar
+            var curBar = this.HistoricalData[total - 1, SeekOriginHistory.Begin] as HistoryItemBar;
+            if (curBar == null) return;
+            double price = curBar.Close;
+
+            var candidates = new List<ZoneBox>();
+
+            // Scan from most recent bar backwards.
+            // idx = base bar index in HistoricalData (0=oldest)
+            // idx+1 = departure bar (more recent, just formed)  ← wait, that's wrong
+            // Let me be explicit:
+            //   For base at absolute index b:
+            //     departure bar = b+1  (one bar newer, closer to current)
+            //     approach bar  = b-1  (one bar older)
+            // So b ranges from 1 to (total-2) to have valid neighbors.
+            // We scan most recent first: b from (total-2) down to (total-1-lookback)
+
+            int scanStart = total - 2;
+            int scanEnd   = Math.Max(1, total - 1 - lookback);
+
+            for (int b = scanStart; b >= scanEnd; b--)
             {
-                // i   = base bar
-                // i-1 = departure bar (more recent)
-                // i+1 = approach bar  (older)
+                var baseBar = this.HistoricalData[b, SeekOriginHistory.Begin] as HistoryItemBar;
+                if (baseBar == null) continue;
 
-                double baseHi  = this.GetPrice(PriceType.High,  i);
-                double baseLo  = this.GetPrice(PriceType.Low,   i);
+                double baseHi  = baseBar.High;
+                double baseLo  = baseBar.Low;
                 double baseRng = baseHi - baseLo;
 
                 if (baseRng <= 0 || baseRng > baseMax) continue;
 
-                // Departure bar
-                double depHi  = this.GetPrice(PriceType.High,  i - 1);
-                double depLo  = this.GetPrice(PriceType.Low,   i - 1);
-                double depO   = this.GetPrice(PriceType.Open,  i - 1);
-                double depC   = this.GetPrice(PriceType.Close, i - 1);
-                double depRng = depHi - depLo;
+                // Departure bar (b+1, more recent — just closed after the base)
+                var depBar = this.HistoricalData[b + 1, SeekOriginHistory.Begin] as HistoryItemBar;
+                if (depBar == null) continue;
 
+                double depRng = depBar.High - depBar.Low;
                 if (depRng < DepartureMultiplier * baseRng) continue;
 
-                bool depBull = depC > depO && depC > baseHi;
-                bool depBear = depC < depO && depC < baseLo;
+                bool depBull = depBar.Close > depBar.Open;
+                bool depBear = depBar.Close < depBar.Open;
                 if (!depBull && !depBear) continue;
 
-                // Approach bar
-                double appO = this.GetPrice(PriceType.Open,  i + 1);
-                double appC = this.GetPrice(PriceType.Close, i + 1);
-
-                // Zone must be on the right side of price
                 bool isDemand = depBull;
+
+                // Zone must sit on correct side of current price
                 if (isDemand  && baseHi >= price) continue;
                 if (!isDemand && baseLo <= price) continue;
 
-                // Invalidated if price closed through zone after formation
-                bool dead = false;
-                for (int j = i - 1; j >= 0; j--)
+                // Approach bar (b-1, older)
+                ZType ztype = ZType.DBR;
+                if (b >= 1)
                 {
-                    double c = this.GetPrice(PriceType.Close, j);
-                    if (isDemand && c < baseLo - tick)  { dead = true; break; }
-                    if (!isDemand && c > baseHi + tick) { dead = true; break; }
+                    var appBar = this.HistoricalData[b - 1, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (appBar != null)
+                    {
+                        bool appBull = appBar.Close > appBar.Open;
+                        if (isDemand)
+                            ztype = appBull ? ZType.RBR : ZType.DBR;
+                        else
+                            ztype = appBull ? ZType.RBD : ZType.DBD;
+                    }
+                }
+
+                // Invalidated: any bar after the base that closed through it
+                bool dead = false;
+                for (int j = b + 2; j < total; j++)
+                {
+                    var jBar = this.HistoricalData[j, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (jBar == null) continue;
+                    if (isDemand  && jBar.Close < baseLo - tick) { dead = true; break; }
+                    if (!isDemand && jBar.Close > baseHi + tick) { dead = true; break; }
                 }
                 if (dead) continue;
 
@@ -176,20 +195,14 @@ namespace TradePhantoms
                     { dup = true; break; }
                 if (dup) continue;
 
-                // Count touches after formation
+                // Count touches (bars after departure that entered the zone)
                 int touches = 0;
-                for (int j = i - 1; j >= 0; j--)
+                for (int j = b + 2; j < total; j++)
                 {
-                    double hi = this.GetPrice(PriceType.High, j);
-                    double lo = this.GetPrice(PriceType.Low,  j);
-                    if (hi >= baseLo && lo <= baseHi) touches++;
+                    var jBar = this.HistoricalData[j, SeekOriginHistory.Begin] as HistoryItemBar;
+                    if (jBar != null && jBar.High >= baseLo && jBar.Low <= baseHi)
+                        touches++;
                 }
-
-                ZType ztype;
-                if (isDemand)
-                    ztype = (appC < appO) ? ZType.DBR : ZType.RBR;
-                else
-                    ztype = (appC > appO) ? ZType.RBD : ZType.DBD;
 
                 var z      = new ZoneBox();
                 z.Top      = baseHi;
@@ -200,7 +213,7 @@ namespace TradePhantoms
                 candidates.Add(z);
             }
 
-            // Keep N closest zones per side
+            // Keep N closest per side
             var demand = new List<ZoneBox>();
             var supply = new List<ZoneBox>();
             foreach (var z in candidates)
@@ -208,11 +221,8 @@ namespace TradePhantoms
                 if (z.IsDemand) demand.Add(z);
                 else supply.Add(z);
             }
-
-            // Demand: sort highest top first (closest below price)
-            demand.Sort((a, b) => b.Top.CompareTo(a.Top));
-            // Supply: sort lowest bottom first (closest above price)
-            supply.Sort((a, b) => a.Bottom.CompareTo(b.Bottom));
+            demand.Sort((a, b2) => b2.Top.CompareTo(a.Top));         // highest top first
+            supply.Sort((a, b2) => a.Bottom.CompareTo(b2.Bottom));   // lowest bottom first
 
             var result = new List<ZoneBox>();
             for (int i = 0; i < Math.Min(MaxZones, demand.Count); i++) result.Add(demand[i]);
@@ -221,23 +231,33 @@ namespace TradePhantoms
             lock (_zoneLock) { _zones.Clear(); _zones.AddRange(result); }
         }
 
-        // ── Rendering ─────────────────────────────────────────────────────────
+        // ── Paint ─────────────────────────────────────────────────────────────
 
         public override void OnPaintChart(PaintChartEventArgs args)
         {
             if (this.Symbol == null || this.CurrentChart == null) return;
+            if (this.HistoricalData == null || this.HistoricalData.Count < 2) return;
 
             List<ZoneBox> zones;
             lock (_zoneLock) { zones = new List<ZoneBox>(_zones); }
             if (zones.Count == 0) return;
 
-            var gr   = args.Graphics;
-            var win  = this.CurrentChart.MainWindow;
+            var gr  = args.Graphics;
+            var win = this.CurrentChart.MainWindow;
             if (win == null) return;
 
-            var    rect      = (Rectangle)win.ClientRectangle;
+            var rect = (Rectangle)win.ClientRectangle;
+
+            // Get current price directly from HistoricalData (safe in OnPaintChart)
+            double price = 0;
+            try
+            {
+                var bar = this.HistoricalData[this.HistoricalData.Count - 1, SeekOriginHistory.Begin] as HistoryItemBar;
+                if (bar != null) price = bar.Close;
+            }
+            catch { return; }
+
             double tick      = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
-            double price     = _lastPrice;
             double proximity = ZoneProximityTicks * tick;
 
             ZoneBox nearest     = null;
@@ -253,14 +273,13 @@ namespace TradePhantoms
                 }
                 catch { continue; }
 
-                if (yTop > yBot) { int t = yTop; yTop = yBot; yBot = t; }
+                if (yTop > yBot) { int tmp = yTop; yTop = yBot; yBot = tmp; }
                 if (yBot < rect.Top || yTop > rect.Bottom) continue;
 
                 int drawTop = Math.Max(yTop, rect.Top);
                 int drawBot = Math.Min(yBot, rect.Bottom);
                 int drawH   = Math.Max(1, drawBot - drawTop);
 
-                // Tested zones render at half opacity
                 int opacity = z.Touches > 0 ? ZoneOpacity / 2 : ZoneOpacity;
                 Color fill  = z.IsDemand
                     ? Color.FromArgb(opacity, 0, 200, 90)
@@ -269,32 +288,28 @@ namespace TradePhantoms
                 using (var fb = new SolidBrush(fill))
                     gr.FillRectangle(fb, rect.Left, drawTop, rect.Width, drawH);
 
-                // Proximal edge line (top of demand zone, bottom of supply zone)
                 Color edge = z.IsDemand
-                    ? Color.FromArgb(160, 0, 230, 100)
-                    : Color.FromArgb(160, 255, 80, 80);
-                int edgeY = z.IsDemand ? yTop : yBot;
+                    ? Color.FromArgb(180, 0, 230, 100)
+                    : Color.FromArgb(180, 255, 80, 80);
 
+                int edgeY = z.IsDemand ? yTop : yBot;
                 using (var ep = new Pen(edge, 1))
                     gr.DrawLine(ep, rect.Left, edgeY, rect.Right, edgeY);
 
-                // Label
                 if (ShowLabels)
                 {
                     string lbl = z.Type.ToString() + (z.Touches > 0 ? "  (" + z.Touches + "T)" : "  FRESH");
-                    using (var lb = new SolidBrush(Color.FromArgb(190, edge)))
+                    using (var lb = new SolidBrush(Color.FromArgb(200, edge)))
                         gr.DrawString(lbl, _fontLabel, lb, rect.Left + 6,
                             z.IsDemand ? yTop - 15 : yBot + 3);
                 }
 
-                // Track nearest for sizing panel
                 double dist = price < z.Bottom ? z.Bottom - price
                             : price > z.Top    ? price - z.Top
                             : 0.0;
                 if (dist < nearestDist) { nearestDist = dist; nearest = z; }
             }
 
-            // Sizing panel when near a zone
             if (nearest != null && nearestDist <= proximity)
                 DrawSizerPanel(gr, win, rect, nearest, price, tick);
         }
@@ -309,29 +324,25 @@ namespace TradePhantoms
             double stopTicks = stopDist / tick;
             double ptVal     = ResolvePointValue();
             double riskPerCt = stopDist * ptVal;
-
             if (riskPerCt <= 0) return;
 
             int    cts       = (int)Math.Floor(RiskPerTrade / riskPerCt);
             cts = Math.Max(1, Math.Min(cts, MaxContracts));
             double totalRisk = cts * riskPerCt;
 
-            Color accent  = isLong ? Color.FromArgb(255, 0, 215, 100)  : Color.FromArgb(255, 255, 65, 65);
-            Color bg      = isLong ? Color.FromArgb(235, 0, 22, 8)     : Color.FromArgb(235, 28, 0, 0);
+            Color accent = isLong ? Color.FromArgb(255, 0, 215, 100) : Color.FromArgb(255, 255, 65, 65);
+            Color bg     = isLong ? Color.FromArgb(235, 0, 22, 8)    : Color.FromArgb(235, 28, 0, 0);
 
-            int pw = 260, ph = 140;
-            int px = rect.Right - pw - 12, py = 12;
+            int pw = 260, ph = 140, px = rect.Right - 272, py = 12;
 
-            using (var bgb = new SolidBrush(bg))
-                gr.FillRectangle(bgb, px, py, pw, ph);
-            using (var brd = new Pen(accent, 2))
-                gr.DrawRectangle(brd, px, py, pw, ph);
-            using (var topBar = new SolidBrush(Color.FromArgb(65, accent.R, accent.G, accent.B)))
-                gr.FillRectangle(topBar, px + 2, py + 2, pw - 4, 20);
+            using (var bgb = new SolidBrush(bg))           gr.FillRectangle(bgb, px, py, pw, ph);
+            using (var brd = new Pen(accent, 2))            gr.DrawRectangle(brd, px, py, pw, ph);
+            using (var bar = new SolidBrush(Color.FromArgb(65, accent.R, accent.G, accent.B)))
+                gr.FillRectangle(bar, px + 2, py + 2, pw - 4, 20);
 
-            string inside = (price >= zone.Bottom && price <= zone.Top) ? "INSIDE" : "NEAR";
+            string status = (price >= zone.Bottom && price <= zone.Top) ? "INSIDE" : "NEAR";
             using (var tb = new SolidBrush(accent))
-                gr.DrawString(inside + "  " + zone.Type.ToString() + "  ·  " + (isLong ? "LONG" : "SHORT"),
+                gr.DrawString(status + "  " + zone.Type.ToString() + "  ·  " + (isLong ? "LONG" : "SHORT"),
                     _fontTitle, tb, px + 8, py + 5);
 
             using (var cb = new SolidBrush(Color.White))
@@ -347,25 +358,19 @@ namespace TradePhantoms
                 "Risk   $" + ((int)Math.Round(totalRisk)) + "  ($" + ((int)Math.Round(riskPerCt)) + "/ct)",
                 "Zone   " + zone.Bottom.ToString("F2") + " – " + zone.Top.ToString("F2"),
             };
-
             using (var dt = new SolidBrush(Color.FromArgb(185, 185, 185)))
                 for (int i = 0; i < lines.Length; i++)
                     gr.DrawString(lines[i], _fontDetail, dt, px + 8, py + 75 + i * 16);
 
-            // Dashed stop line on chart
             try
             {
                 int ys = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(stopPrice));
                 if (ys >= rect.Top && ys <= rect.Bottom)
                 {
                     using (var sp = new Pen(Color.FromArgb(200, 255, 80, 80), 1))
-                    {
-                        sp.DashStyle = DashStyle.Dash;
-                        gr.DrawLine(sp, rect.Left, ys, rect.Right, ys);
-                    }
+                    { sp.DashStyle = DashStyle.Dash; gr.DrawLine(sp, rect.Left, ys, rect.Right, ys); }
                     using (var sl = new SolidBrush(Color.FromArgb(200, 255, 80, 80)))
-                        gr.DrawString("STOP  " + stopPrice.ToString("F2"), _fontDetail, sl,
-                            rect.Left + 4, ys - 14);
+                        gr.DrawString("STOP  " + stopPrice.ToString("F2"), _fontDetail, sl, rect.Left + 4, ys - 14);
                 }
             }
             catch { }
@@ -392,18 +397,12 @@ namespace TradePhantoms
             string root = this.Symbol.Name.TrimEnd("0123456789HMUZ".ToCharArray()).ToUpperInvariant();
             switch (root)
             {
-                case "MNQ": return 2.0;
-                case "NQ":  return 20.0;
-                case "MES": return 5.0;
-                case "ES":  return 50.0;
-                case "M2K": return 5.0;
-                case "RTY": return 50.0;
-                case "MYM": return 0.5;
-                case "YM":  return 5.0;
-                case "CL":  return 1000.0;
-                case "MCL": return 100.0;
-                case "GC":  return 100.0;
-                case "MGC": return 10.0;
+                case "MNQ": return 2.0;   case "NQ":  return 20.0;
+                case "MES": return 5.0;   case "ES":  return 50.0;
+                case "M2K": return 5.0;   case "RTY": return 50.0;
+                case "MYM": return 0.5;   case "YM":  return 5.0;
+                case "CL":  return 1000.0; case "MCL": return 100.0;
+                case "GC":  return 100.0;  case "MGC": return 10.0;
                 default:    return 2.0;
             }
         }
