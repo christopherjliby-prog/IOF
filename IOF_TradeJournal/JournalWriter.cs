@@ -15,8 +15,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace TradePhantoms.Journal
 {
@@ -27,12 +25,6 @@ namespace TradePhantoms.Journal
         private readonly object _lock = new();
         private readonly List<JournalEntry> _entries = new();
         private bool _csvHeaderWritten;
-
-        private static readonly JsonSerializerOptions _jsonOpts = new()
-        {
-            WriteIndented = true,
-            DefaultIgnoreCondition = JsonIgnoreCondition.Never
-        };
 
         public JournalWriter(string directory, DateTime date)
         {
@@ -92,8 +84,91 @@ namespace TradePhantoms.Journal
 
         private void WriteJson()
         {
-            string json = JsonSerializer.Serialize(_entries, _jsonOpts);
-            File.WriteAllText(JsonPath(), json, Encoding.UTF8);
+            var sb = new StringBuilder();
+            sb.AppendLine("[");
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                sb.Append(EntryToJson(_entries[i]));
+                if (i < _entries.Count - 1) sb.Append(",");
+                sb.AppendLine();
+            }
+            sb.Append("]");
+            File.WriteAllText(JsonPath(), sb.ToString(), Encoding.UTF8);
+        }
+
+        private static string EntryToJson(JournalEntry e)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("  {");
+            Jstr(sb, "TradeId",            e.TradeId);
+            Jstr(sb, "Date",               e.Date.ToString("yyyy-MM-dd"));
+            Jstr(sb, "EntryTime",          e.EntryTime.ToString("o"));
+            Jstr(sb, "ExitTime",           e.ExitTime == default ? "" : e.ExitTime.ToString("o"));
+            Jnum(sb, "HoldTimeSeconds",    e.HoldTimeSeconds);
+            Jstr(sb, "HoldTimeFormatted",  e.HoldTimeFormatted);
+            Jstr(sb, "Session",            e.Session);
+            Jstr(sb, "TimeOfDayBucket",    e.TimeOfDayBucket);
+            Jstr(sb, "Symbol",             e.Symbol);
+            Jstr(sb, "Direction",          e.Direction);
+            Jnum(sb, "Contracts",          e.Contracts);
+            Jnum(sb, "EntryPrice",         e.EntryPrice);
+            Jnum(sb, "ExitPrice",          e.ExitPrice);
+            Jnum(sb, "GrossPnL",           e.GrossPnL);
+            Jnum(sb, "Commission",         e.Commission);
+            Jnum(sb, "NetPnL",             e.NetPnL);
+            Jstr(sb, "ExitReason",         e.ExitReason);
+            Jnum(sb, "RMultiple",          e.RMultiple);
+            Jstr(sb, "EntryGrade",         e.EntryGrade);
+            Jstr(sb, "NearestZoneType",    e.NearestZoneType);
+            Jnum(sb, "NearestZoneTop",     e.NearestZoneTop);
+            Jnum(sb, "NearestZoneBottom",  e.NearestZoneBottom);
+            Jnum(sb, "ZoneScore",          e.ZoneScore);
+            Jnum(sb, "ZoneScoreMax",       e.ZoneScoreMax);
+            Jbool(sb, "EntryInsideZone",   e.EntryInsideZone);
+            Jnum(sb, "EntryDistanceFromZoneEdgeTicks", e.EntryDistanceFromZoneEdgeTicks);
+            Jnum(sb, "DepartureMultiplier",  e.DepartureMultiplier);
+            Jnum(sb, "AbsorptionMultiplier", e.AbsorptionMultiplier);
+            Jnum(sb, "MtfcBonus",            e.MtfcBonus);
+            Jbool(sb, "HvnConfluence",       e.HvnConfluence);
+            Jnum(sb, "ZoneTouchCountAtEntry", e.ZoneTouchCountAtEntry);
+            Jstr(sb, "ZonePurityAtEntry",    e.ZonePurityAtEntry);
+            Jstr(sb, "ZoneTimeframe",        e.ZoneTimeframe);
+            Jstr(sb, "HtfTrend",             e.HtfTrend);
+            Jstr(sb, "ItfTrend",             e.ItfTrend);
+            Jbool(sb, "TradeWithTrend",      e.TradeWithTrend);
+            Jnum(sb, "NearestHtfZoneDistance", e.NearestHtfZoneDistance);
+            Jnum(sb, "BarAtr20",             e.BarAtr20);
+            Jbool(sb, "HitTp1",             e.HitTp1);
+            Jbool(sb, "HitTp2",             e.HitTp2);
+            Jbool(sb, "HitTp3",             e.HitTp3);
+            Jbool(sb, "EarlyExit",          e.EarlyExit);
+            Jbool(sb, "StopMoved",          e.StopMoved);
+            Jnum(sb, "MaxAdverseExcursion",  e.MaxAdverseExcursion);
+            Jlast(sb, "MaxFavorableExcursion", e.MaxFavorableExcursion);
+            sb.Append("  }");
+            return sb.ToString();
+        }
+
+        private static void Jstr(StringBuilder sb, string key, string val)
+            => sb.AppendLine($"    \"{key}\": \"{JEsc(val)}\",");
+
+        private static void Jnum(StringBuilder sb, string key, double val)
+            => sb.AppendLine($"    \"{key}\": {val},");
+
+        private static void Jnum(StringBuilder sb, string key, int val)
+            => sb.AppendLine($"    \"{key}\": {val},");
+
+        private static void Jbool(StringBuilder sb, string key, bool val)
+            => sb.AppendLine($"    \"{key}\": {(val ? "true" : "false")},");
+
+        private static void Jlast(StringBuilder sb, string key, double val)
+            => sb.AppendLine($"    \"{key}\": {val}");
+
+        private static string JEsc(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                    .Replace("\n", "\\n").Replace("\r", "\\r");
         }
 
         // ── HTML Dashboard ────────────────────────────────────────────────────
