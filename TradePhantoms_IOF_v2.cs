@@ -1970,6 +1970,24 @@ namespace TradePhantomsIOF
             this.lastTickCurSL.Clear();
             this.beAlertedTrades.Clear();
 
+            // Defense: clear zones + reset bar counter so no stale render if
+            // OnInit is delayed or a symbol/TF switch races with OnUpdate.
+            this.zones.Clear();
+            this.lastProcessedBarCount = -1;
+
+            // Clear shared registries so stale zones/metrics don't persist for
+            // cross-indicator consumers (journal, VolumeSpike) after a switch.
+            try
+            {
+                string regKey = GetRegistryKey();
+                if (!string.IsNullOrEmpty(regKey))
+                {
+                    TradePhantoms.IOFZoneRegistry.Clear(regKey);
+                    TradePhantoms.ZoneMetricsRegistry.Clear(regKey);
+                }
+            }
+            catch { }
+
             // Trend cleanup (2026-05-06): unsubscribe events so a re-init
             // doesn't double-fire onto a fresh handler set, and flush the
             // marker lists so a chart reload starts visually clean.
@@ -4986,6 +5004,11 @@ namespace TradePhantomsIOF
 
             // Fire NEW-zone alerts for any zone IDs we haven't seen before.
             FireZoneDetectedAlerts();
+
+            // Publish zone list to shared registry for cross-indicator consumers
+            // (IOF_TradeJournal, VolumeSpike_IOF). Called after every scan pass
+            // so consumers see the current zone set immediately after each bar.
+            PublishToZoneRegistry();
         }
 
         // Translate "RBR" / "DBR" / "RBD" / "DBD" → ZoneType. Falls back to RBR.
@@ -5025,6 +5048,60 @@ namespace TradePhantomsIOF
                 {
                     Core.Instance.Loggers.Log(ex, "TradePhantoms_IOF_v2.FireZoneDetectedAlerts");
                 }
+            }
+        }
+
+        // ── Registry publishing ───────────────────────────────────────────────
+
+        private string GetRegistryKey()
+        {
+            try
+            {
+                string sym    = this.Symbol?.Name ?? "";
+                string period = this.HistoricalData?.Aggregation?.ToString() ?? "";
+                return $"{sym}_{period}";
+            }
+            catch { return ""; }
+        }
+
+        // Builds and pushes a ZoneSnapshot list into IOFZoneRegistry after each
+        // ScanZones() pass. Consumers (journal, VolumeSpike) read from there.
+        private void PublishToZoneRegistry()
+        {
+            try
+            {
+                string regKey = GetRegistryKey();
+                if (string.IsNullOrEmpty(regKey)) return;
+
+                var snapshots = new System.Collections.Generic.List<TradePhantoms.ZoneSnapshot>(this.zones.Count);
+                for (int i = 0; i < this.zones.Count; i++)
+                {
+                    var z = this.zones[i];
+                    if (z == null || z.Invalidated) continue;
+                    snapshots.Add(new TradePhantoms.ZoneSnapshot(
+                        z.Top,
+                        z.Bottom,
+                        ToRegistryZoneType(z.Type),
+                        z.Score,
+                        z.Score >= MinScore,
+                        z.TouchCount
+                    ));
+                }
+                TradePhantoms.IOFZoneRegistry.Update(regKey, snapshots);
+            }
+            catch { }
+        }
+
+        // Converts the internal private ZoneType enum to the public registry enum.
+        // (Both have RBR/DBR/DBD/RBD — ordinals differ so we map by name.)
+        private static TradePhantoms.ZoneType ToRegistryZoneType(ZoneType t)
+        {
+            switch (t)
+            {
+                case ZoneType.DBR: return TradePhantoms.ZoneType.DBR;
+                case ZoneType.RBD: return TradePhantoms.ZoneType.RBD;
+                case ZoneType.DBD: return TradePhantoms.ZoneType.DBD;
+                default:           return TradePhantoms.ZoneType.RBR;
             }
         }
 
@@ -5895,6 +5972,21 @@ namespace TradePhantomsIOF
                     {
                         zm = ComputeZoneMetrics(z, isDemand);
                         _zoneMetrics[z.Id] = zm;
+                        // Phase 2: publish metrics to shared registry for journal A-F grading.
+                        try
+                        {
+                            string regKey = GetRegistryKey();
+                            if (!string.IsNullOrEmpty(regKey))
+                                TradePhantoms.ZoneMetricsRegistry.Update(regKey, z.Top, z.Bottom,
+                                    new TradePhantoms.ZoneMetricsExport
+                                    {
+                                        DepartureMultiplier  = zm.DepartureMultiplier,
+                                        AbsorptionMultiplier = zm.AbsorptionMultiplier,
+                                        MtfcBonus            = z.MtfcBonus,
+                                        HvnConfluence        = IsZoneNearHvn(z)
+                                    });
+                        }
+                        catch { }
                     }
                     if (RequireDepartureStrength && zm.DepartureMultiplier < DepartureMultiplierMin) continue;
                     if (RequireBaseAbsorption   && zm.AbsorptionMultiplier < AbsorptionMultiplierMin) continue;

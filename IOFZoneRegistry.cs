@@ -14,7 +14,7 @@
 //   THREAD   : Both run on the Quantower indicator thread — no locking needed.
 //              If that assumption changes, wrap _zones in a ReaderWriterLockSlim.
 //
-// Key: "{SymbolName}_{TimeframePeriod}" e.g. "MNQ_5" or "MES_15"
+// Key: "{SymbolName}_{Aggregation.ToString()}" e.g. "MNQ_5" or "MES_15"
 //
 // -----------------------------------------------------------------------------
 // PATCH NOTES
@@ -25,6 +25,16 @@
 //   - IsNearZone() checks price proximity within tolerance (ticks * tickSize)
 //   - GetZones() for consumers that want the full snapshot (e.g. future ML feed)
 //   - ZoneSnapshot record: Top, Bottom, Type, Score, IsTradeable, TouchCount
+//
+// 2026-06-03: Phase 2 — ZoneMetricsRegistry added.
+//   - ZoneMetricsExport: DepartureMultiplier, AbsorptionMultiplier, MtfcBonus,
+//     HvnConfluence — the four confluence factors used for A-F entry grading.
+//   - ZoneMetricsRegistry: keyed by "{regKey}|{top:F4}|{bottom:F4}". Populated
+//     lazily from DrawZones() when departure/absorption filters are applied.
+//   - IOFZoneRegistry.Update() now called from ScanZones() in IOF v2 after
+//     every scan pass (previously it was never called — bug fixed).
+//   - IOFZoneRegistry.Clear() now called from OnClear() in IOF v2 so stale
+//     zones don't persist after a symbol/timeframe switch.
 // =============================================================================
 
 using System;
@@ -42,7 +52,7 @@ namespace TradePhantoms
         /// <summary>
         /// Replace the zone list for this symbol+timeframe key.
         /// Call at the end of each ScanZones pass.
-        /// Key convention: $"{symbol.Name}_{period}" e.g. "MNQ_5"
+        /// Key convention: $"{symbol.Name}_{aggregation}" e.g. "MNQ_5"
         /// </summary>
         public static void Update(string key, List<ZoneSnapshot> zones)
         {
@@ -107,4 +117,83 @@ namespace TradePhantoms
     // RBR = Rally-Base-Rally (demand), DBD = Drop-Base-Drop (supply),
     // DBR = Drop-Base-Rally (demand), RBD = Rally-Base-Drop (supply)
     public enum ZoneType { RBR, DBR, DBD, RBD }
+
+    // =========================================================================
+    // ZoneMetricsRegistry — Phase 2 confluence metrics for A-F entry grading
+    // =========================================================================
+    // Keyed by "{regKey}|{top:F4}|{bottom:F4}" where regKey matches the
+    // IOFZoneRegistry key for the same chart. Populated lazily from
+    // DrawZones() in IOF v2 when departure/absorption filters run.
+    //
+    // The IOF_TradeJournal indicator reads this via reflection at position-open
+    // time to populate DepartureMultiplier, AbsorptionMultiplier, MtfcBonus,
+    // and HvnConfluence on each JournalEntry for full A-F grading.
+    // =========================================================================
+
+    public static class ZoneMetricsRegistry
+    {
+        private static readonly Dictionary<string, ZoneMetricsExport> _metrics
+            = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Store or update metrics for a zone identified by its top/bottom price levels.
+        /// Called from IOF v2 DrawZones() after ComputeZoneMetrics() runs.
+        /// </summary>
+        public static void Update(string regKey, double top, double bottom, ZoneMetricsExport metrics)
+        {
+            if (string.IsNullOrEmpty(regKey)) return;
+            string key = MakeKey(regKey, top, bottom);
+            _metrics[key] = metrics;
+        }
+
+        /// <summary>
+        /// Try to retrieve metrics for a zone. Returns false if not yet computed
+        /// (ComputeZoneMetrics is lazy — runs on first DrawZones pass for each zone).
+        /// </summary>
+        public static bool TryGet(string regKey, double top, double bottom, out ZoneMetricsExport metrics)
+        {
+            string key = MakeKey(regKey, top, bottom);
+            return _metrics.TryGetValue(key, out metrics);
+        }
+
+        /// <summary>Overload used by journal reflection path (passes zoneKey as pre-formatted string).</summary>
+        public static bool TryGet(string regKey, string zoneKey, out ZoneMetricsExport metrics)
+        {
+            string key = string.IsNullOrEmpty(regKey)
+                ? zoneKey
+                : $"{regKey}|{zoneKey}";
+            return _metrics.TryGetValue(key, out metrics);
+        }
+
+        /// <summary>
+        /// Clears all metrics for a given registry key (call from IOF v2 OnClear).
+        /// </summary>
+        public static void Clear(string regKey)
+        {
+            if (string.IsNullOrEmpty(regKey)) return;
+            var toRemove = new List<string>();
+            foreach (var kv in _metrics)
+            {
+                if (kv.Key.StartsWith(regKey + "|", StringComparison.OrdinalIgnoreCase))
+                    toRemove.Add(kv.Key);
+            }
+            foreach (var k in toRemove)
+                _metrics.Remove(k);
+        }
+
+        private static string MakeKey(string regKey, double top, double bottom)
+            => $"{regKey}|{top:F4}|{bottom:F4}";
+    }
+
+    /// <summary>
+    /// The four confluence factors that drive A-F entry grade computation.
+    /// Exported from IOF v2's internal ZoneMetrics struct for cross-indicator access.
+    /// </summary>
+    public struct ZoneMetricsExport
+    {
+        public double DepartureMultiplier;   // impulse vol ÷ avg vol (≥2× = bullish)
+        public double AbsorptionMultiplier;  // base vol/range ÷ avg  (≥2× = bullish)
+        public double MtfcBonus;             // > 0 when zone overlaps higher-TF zone
+        public bool   HvnConfluence;         // true when an HVN sits inside the zone
+    }
 }

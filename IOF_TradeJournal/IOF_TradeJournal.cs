@@ -355,7 +355,10 @@ namespace TradePhantoms.Journal
         {
             try
             {
-                string iofKey = $"{this.Symbol?.Name}_{IofTimeframe}";
+                // Key must match IOF v2's GetRegistryKey() → Aggregation.ToString().
+                // IofTimeframe parameter is kept as a display label only.
+                string period = this.HistoricalData?.Aggregation?.ToString() ?? IofTimeframe.ToString();
+                string iofKey = $"{this.Symbol?.Name}_{period}";
                 double tolerance = ZoneProximityTicks * (this.Symbol?.TickSize ?? 0.25);
 
                 Type regType = null;
@@ -427,23 +430,23 @@ namespace TradePhantoms.Journal
         {
             try
             {
-                // Look for an optional ZoneMetricsRegistry class in IOF v2
-                // (will be added in Phase 2 of IOF v2 integration)
                 Type metricsType = regType.Assembly.GetType("TradePhantoms.ZoneMetricsRegistry");
                 if (metricsType == null) return;
 
-                var tryGet = metricsType.GetMethod("TryGet", BindingFlags.Public | BindingFlags.Static);
+                // Use the double-overload: TryGet(regKey, top, bottom, out ZoneMetricsExport)
+                var tryGet = metricsType.GetMethod("TryGet",
+                    new[] { typeof(string), typeof(double), typeof(double), metricsType.Assembly.GetType("TradePhantoms.ZoneMetricsExport").MakeByRefType() });
+
                 if (tryGet == null) return;
 
-                // Key: zone Top+Bottom as a pseudo-ID
-                string zoneKey = $"{entry.NearestZoneTop:F4}_{entry.NearestZoneBottom:F4}";
-                string regKey  = $"{this.Symbol?.Name}_{IofTimeframe}";
+                string period = this.HistoricalData?.Aggregation?.ToString() ?? IofTimeframe.ToString();
+                string regKey = $"{this.Symbol?.Name}_{period}";
 
-                object[] parms = new object[] { regKey, zoneKey, null };
+                object[] parms = new object[] { regKey, entry.NearestZoneTop, entry.NearestZoneBottom, null };
                 bool found = (bool)tryGet.Invoke(null, parms);
                 if (!found) return;
 
-                object m = parms[2];
+                object m = parms[3];
                 if (m == null) return;
 
                 entry.DepartureMultiplier  = GetProp<double>(m, "DepartureMultiplier");
