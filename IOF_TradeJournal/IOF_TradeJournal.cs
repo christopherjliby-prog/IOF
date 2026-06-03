@@ -58,10 +58,10 @@ namespace TradePhantoms.Journal
         // ── Internal state ────────────────────────────────────────────────────
 
         // Open positions: positionId → in-progress JournalEntry
-        private readonly Dictionary<string, JournalEntry> _pending = new();
+        private readonly Dictionary<string, JournalEntry> _pending = new Dictionary<string, JournalEntry>();
 
         // Completed entries for overlay rendering
-        private readonly List<JournalEntry> _completed = new();
+        private readonly List<JournalEntry> _completed = new List<JournalEntry>();
 
         // Journal writer (re-created at midnight rollover)
         private JournalWriter _writer;
@@ -72,7 +72,7 @@ namespace TradePhantoms.Journal
         private static readonly TimeZoneInfo _et = GetEasternTz();
 
         // Phase 3: MAE/MFE tick tracking (lock-protected — NewLast fires on IO thread)
-        private readonly Dictionary<string, (double entryPrice, bool isLong, double mae, double mfe)> _maeTracking = new();
+        private readonly Dictionary<string, (double entryPrice, bool isLong, double mae, double mfe)> _maeTracking = new Dictionary<string, (double entryPrice, bool isLong, double mae, double mfe)>();
         private readonly object _maeLock = new object();
 
         // Phase 3: cached per-bar environment values (updated in OnUpdate)

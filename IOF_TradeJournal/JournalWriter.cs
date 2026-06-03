@@ -22,8 +22,8 @@ namespace TradePhantoms.Journal
     {
         private readonly string _dir;
         private readonly DateTime _date;
-        private readonly object _lock = new();
-        private readonly List<JournalEntry> _entries = new();
+        private readonly object _lock = new object();
+        private readonly List<JournalEntry> _entries = new List<JournalEntry>();
         private bool _csvHeaderWritten;
 
         public JournalWriter(string directory, DateTime date)
