@@ -4,34 +4,14 @@
 // Platform : Quantower C# SDK (v1.143.x / TradingPlatform.BusinessLayer)
 // Drop path: C:\Quantower\Settings\Scripts\Indicators\IOF_TradeJournal\
 //
-// What this does:
-//   Hooks into Quantower's live position feed and auto-journals every trade
-//   you take with full IOF zone context, environment state, and an A-F entry
-//   quality grade — then writes structured CSV + JSON logs in real time.
-//   Grade D/F entries trigger an immediate "WTF Are You Doing?!" alert.
-//
-// Build phases:
-//   Phase 1 (this build): Position feed, CSV + JSON logging, execution data
-//   Phase 2: IOFZoneRegistry lookup, zone context, full A-F grading
-//   Phase 3: Environment (HTF/ITF trend, ATR, MAE/MFE tracking)
-//   Phase 4: Daily HTML dashboard auto-generation at EOD
+// Phases implemented:
+//   Phase 1: Position feed, CSV + JSON logging, session detection, chart overlay
+//   Phase 2: IOFZoneRegistry lookup, ZoneMetricsRegistry, full A-F grading
+//   Phase 3: EMA trend (ITF/HTF), ATR-20, MAE/MFE tick tracking, TP inference
+//   Phase 4: EOD HTML dashboard with D:×/ABS:× tables, MTFC/HVN, freshness, time-of-day
 //
 // Dependencies:
-//   - IOFZoneRegistry (in TradePhantoms_IOF_v2.dll) accessed via reflection
-//   - No Rithmic API. No external services. Zero friction.
-// =============================================================================
-// PATCH NOTES
-// -----------------------------------------------------------------------------
-// 2026-06-03: Initial build (Phase 1).
-//   - Position feed subscription (PositionAdded / PositionRemoved)
-//   - JournalEntry creation at open, completion at close
-//   - CSV + JSON real-time append
-//   - Session classification (London / NY_Open / NY_Mid / NY_Close)
-//   - IOFZoneRegistry lookup via reflection (nearest zone at entry)
-//   - Entry grade computation via EntryGrader (Phase 1: inside/outside only)
-//   - Grade D/F alert pop-up ("WTF Are You Doing?!")
-//   - Chart overlay labels at entry/exit (grade + R at exit)
-//   - HTML dashboard generated at 4:00 PM ET or on dispose
+//   - IOFZoneRegistry + ZoneMetricsRegistry (TradePhantoms_IOF_v2.dll) via reflection
 // =============================================================================
 
 using System;
@@ -77,25 +57,34 @@ namespace TradePhantoms.Journal
 
         // ── Internal state ────────────────────────────────────────────────────
 
-        // Pending (open) positions: positionId → in-progress JournalEntry
+        // Open positions: positionId → in-progress JournalEntry
         private readonly Dictionary<string, JournalEntry> _pending = new();
 
         // Completed entries for overlay rendering
         private readonly List<JournalEntry> _completed = new();
 
-        // Journal writer (one per trading day; re-created at midnight rollover)
+        // Journal writer (re-created at midnight rollover)
         private JournalWriter _writer;
         private DateTime      _writerDate = DateTime.MinValue;
 
-        // For EOD HTML generation at 4 PM ET
+        // EOD HTML at 4 PM ET
         private bool _eodDone;
         private static readonly TimeZoneInfo _et = GetEasternTz();
+
+        // Phase 3: MAE/MFE tick tracking (lock-protected — NewLast fires on IO thread)
+        private readonly Dictionary<string, (double entryPrice, bool isLong, double mae, double mfe)> _maeTracking = new();
+        private readonly object _maeLock = new object();
+
+        // Phase 3: cached per-bar environment values (updated in OnUpdate)
+        private double _cachedAtr20;
+        private string _cachedItfTrend = "";
+        private string _cachedHtfTrend = "";
 
         // Fonts / brushes for chart overlay
         private Font  _labelFont;
         private Brush _brushA, _brushB, _brushC, _brushD, _brushF, _brushQ, _brushExit, _brushBg;
 
-        // ── Quantower indicator lifecycle ─────────────────────────────────────
+        // ── Indicator lifecycle ───────────────────────────────────────────────
 
         protected override void OnInit()
         {
@@ -114,17 +103,29 @@ namespace TradePhantoms.Journal
 
             EnsureWriter();
 
-            try { Core.Instance.PositionAdded   -= OnPositionAdded;   } catch { }
-            try { Core.Instance.PositionRemoved  -= OnPositionRemoved; } catch { }
-            Core.Instance.PositionAdded   += OnPositionAdded;
-            Core.Instance.PositionRemoved  += OnPositionRemoved;
+            try { Core.Instance.PositionAdded  -= OnPositionAdded;  } catch { }
+            try { Core.Instance.PositionRemoved -= OnPositionRemoved; } catch { }
+            Core.Instance.PositionAdded  += OnPositionAdded;
+            Core.Instance.PositionRemoved += OnPositionRemoved;
+
+            // Phase 3: tick-level MAE/MFE tracking
+            if (this.Symbol != null)
+            {
+                try { this.Symbol.NewLast -= OnNewLast_Journal; } catch { }
+                this.Symbol.NewLast += OnNewLast_Journal;
+            }
 
             Core.Instance.Loggers.Log("IOF Trade Journal: initialized.", LoggingLevel.System);
         }
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            // EOD HTML dashboard at 4:00 PM ET
+            // Phase 3: refresh cached environment state on each new bar
+            _cachedAtr20    = ComputeAtr20();
+            _cachedItfTrend = ComputeEmaTrend(50);
+            _cachedHtfTrend = ComputeEmaTrend(200);
+
+            // Phase 4: EOD HTML at 4:00 PM ET
             if (!_eodDone && EnableHtmlDashboard)
             {
                 DateTime et = ToEasternTime(DateTime.UtcNow);
@@ -145,27 +146,31 @@ namespace TradePhantoms.Journal
 
         protected override void OnClear()
         {
-            try { Core.Instance.PositionAdded   -= OnPositionAdded;   } catch { }
-            try { Core.Instance.PositionRemoved  -= OnPositionRemoved; } catch { }
+            try { Core.Instance.PositionAdded  -= OnPositionAdded;  } catch { }
+            try { Core.Instance.PositionRemoved -= OnPositionRemoved; } catch { }
+            if (this.Symbol != null)
+                try { this.Symbol.NewLast -= OnNewLast_Journal; } catch { }
         }
 
         public override void Dispose()
         {
-            try { Core.Instance.PositionAdded   -= OnPositionAdded;   } catch { }
-            try { Core.Instance.PositionRemoved  -= OnPositionRemoved; } catch { }
+            try { Core.Instance.PositionAdded  -= OnPositionAdded;  } catch { }
+            try { Core.Instance.PositionRemoved -= OnPositionRemoved; } catch { }
+            if (this.Symbol != null)
+                try { this.Symbol.NewLast -= OnNewLast_Journal; } catch { }
 
             if (EnableHtmlDashboard && _writer != null)
                 try { GenerateHtml(); } catch { }
 
             _labelFont?.Dispose();
-            (_brushA  as IDisposable)?.Dispose();
-            (_brushB  as IDisposable)?.Dispose();
-            (_brushC  as IDisposable)?.Dispose();
-            (_brushD  as IDisposable)?.Dispose();
-            (_brushF  as IDisposable)?.Dispose();
-            (_brushQ  as IDisposable)?.Dispose();
+            (_brushA   as IDisposable)?.Dispose();
+            (_brushB   as IDisposable)?.Dispose();
+            (_brushC   as IDisposable)?.Dispose();
+            (_brushD   as IDisposable)?.Dispose();
+            (_brushF   as IDisposable)?.Dispose();
+            (_brushQ   as IDisposable)?.Dispose();
             (_brushExit as IDisposable)?.Dispose();
-            (_brushBg as IDisposable)?.Dispose();
+            (_brushBg  as IDisposable)?.Dispose();
 
             base.Dispose();
         }
@@ -178,37 +183,49 @@ namespace TradePhantoms.Journal
             try
             {
                 string posId = position.Id?.ToString() ?? Guid.NewGuid().ToString();
-                if (_pending.ContainsKey(posId)) return;  // already tracking
+                if (_pending.ContainsKey(posId)) return;
 
-                bool   isLong      = position.Side == Side.Buy;
-                double entryPrice  = position.OpenPrice;
-                int    contracts   = (int)Math.Abs(position.Quantity);
-                DateTime entryUtc  = DateTime.UtcNow;
+                bool   isLong     = position.Side == Side.Buy;
+                double entryPrice = position.OpenPrice;
+                int    contracts  = (int)Math.Abs(position.Quantity);
+                DateTime entryUtc = DateTime.UtcNow;
 
                 var entry = new JournalEntry
                 {
-                    PositionId   = posId,
-                    TradeId      = BuildTradeId(entryUtc, this.Symbol.Name),
-                    Date         = entryUtc.Date,
-                    EntryTime    = entryUtc,
-                    Session      = SessionClassifier.Classify(entryUtc),
+                    PositionId      = posId,
+                    TradeId         = BuildTradeId(entryUtc, this.Symbol.Name),
+                    Date            = entryUtc.Date,
+                    EntryTime       = entryUtc,
+                    Session         = SessionClassifier.Classify(entryUtc),
                     TimeOfDayBucket = SessionClassifier.GetTimeBucket(entryUtc),
-                    Symbol       = this.Symbol?.Name ?? "",
-                    Direction    = isLong ? "LONG" : "SHORT",
-                    Contracts    = contracts,
-                    EntryPrice   = entryPrice,
-                    IsComplete   = false
+                    Symbol          = this.Symbol?.Name ?? "",
+                    Direction       = isLong ? "LONG" : "SHORT",
+                    Contracts       = contracts,
+                    EntryPrice      = entryPrice,
+                    IsComplete      = false,
+
+                    // Phase 3: environment snapshot at entry
+                    BarAtr20     = _cachedAtr20,
+                    ItfTrend     = _cachedItfTrend,
+                    HtfTrend     = _cachedHtfTrend,
+                    TradeWithTrend = IsTradeWithTrend(isLong, _cachedItfTrend),
                 };
 
-                // Zone lookup (reflection — safe no-op if IOF v2 not loaded)
+                // Phase 2: zone context + grade
                 PopulateZoneContext(entry, entryPrice);
-
-                // Grade based on Phase 1 data
                 entry.EntryGrade = EntryGrader.Grade(entry);
+
+                // Phase 3: HTF zone proximity
+                entry.NearestHtfZoneDistance = ComputeNearestHtfZoneDistance(entryPrice);
+
+                // Phase 3: start MAE/MFE tracking
+                lock (_maeLock)
+                {
+                    _maeTracking[posId] = (entryPrice, isLong, 0.0, 0.0);
+                }
 
                 _pending[posId] = entry;
 
-                // Grade D/F alert
                 if (AlertOnGradeDF &&
                     (entry.EntryGrade == "D" || entry.EntryGrade == "F" || entry.EntryGrade == "?"))
                 {
@@ -220,11 +237,8 @@ namespace TradePhantoms.Journal
                 }
 
                 Core.Instance.Loggers.Log(
-                    $"IOF Journal: OPEN {entry.Direction} {contracts}x {this.Symbol?.Name} @ {entryPrice:F2} | Grade={entry.EntryGrade} Zone={entry.NearestZoneType}",
+                    $"IOF Journal: OPEN {entry.Direction} {contracts}x {this.Symbol?.Name} @ {entryPrice:F2} | Grade={entry.EntryGrade} Zone={entry.NearestZoneType} ITF={entry.ItfTrend} HTF={entry.HtfTrend}",
                     LoggingLevel.System);
-
-                // Force chart repaint for overlay
-                // (chart repaints automatically on next render pass)
             }
             catch (Exception ex)
             {
@@ -244,17 +258,17 @@ namespace TradePhantoms.Journal
                 double   pnl     = 0;
                 try { pnl = position.GrossPnL?.Value ?? 0; } catch { }
 
-                double tickSize  = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+                double tickSize   = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25;
                 double pointValue = ResolvePointValue();
 
                 // Back-calculate exit price from gross P&L
                 double exitPrice;
                 if (entry.Contracts > 0 && pointValue > 0)
                 {
-                    double multiplier = entry.Contracts * pointValue;
+                    double mult = entry.Contracts * pointValue;
                     exitPrice = entry.Direction == "LONG"
-                        ? entry.EntryPrice + pnl / multiplier
-                        : entry.EntryPrice - pnl / multiplier;
+                        ? entry.EntryPrice + pnl / mult
+                        : entry.EntryPrice - pnl / mult;
                 }
                 else
                 {
@@ -264,15 +278,34 @@ namespace TradePhantoms.Journal
                 double commission = entry.Contracts * CommissionPerContractRT;
                 double netPnl     = pnl - commission;
 
-                entry.ExitTime         = exitUtc;
-                entry.HoldTimeSeconds  = (int)(exitUtc - entry.EntryTime).TotalSeconds;
+                // Phase 3: harvest MAE/MFE
+                lock (_maeLock)
+                {
+                    if (_maeTracking.TryGetValue(posId, out var tracking))
+                    {
+                        entry.MaxAdverseExcursion   = tracking.mae;
+                        entry.MaxFavorableExcursion = tracking.mfe;
+                        _maeTracking.Remove(posId);
+                    }
+                }
+
+                entry.ExitTime          = exitUtc;
+                entry.HoldTimeSeconds   = (int)(exitUtc - entry.EntryTime).TotalSeconds;
                 entry.HoldTimeFormatted = JournalEntry.FormatHoldTime(entry.HoldTimeSeconds);
-                entry.ExitPrice        = exitPrice;
-                entry.GrossPnL         = pnl;
-                entry.Commission       = commission;
-                entry.NetPnL           = netPnl;
-                entry.ExitReason       = InferExitReason(pnl);
-                entry.IsComplete       = true;
+                entry.ExitPrice         = exitPrice;
+                entry.GrossPnL          = pnl;
+                entry.Commission        = commission;
+                entry.NetPnL            = netPnl;
+                entry.ExitReason        = InferExitReason(pnl);
+                entry.IsComplete        = true;
+
+                // R-multiple: 1R = zone height × contracts × pointValue
+                double zoneHeight = Math.Abs(entry.NearestZoneTop - entry.NearestZoneBottom);
+                if (zoneHeight > 0 && entry.Contracts > 0 && pointValue > 0)
+                    entry.RMultiple = pnl / (entry.Contracts * zoneHeight * pointValue);
+
+                // Phase 3: TP hit inference from MFE vs zone height
+                InferTpHits(entry);
 
                 _pending.Remove(posId);
                 _completed.Add(entry);
@@ -281,14 +314,38 @@ namespace TradePhantoms.Journal
                 _writer.AppendTrade(entry, EnableCsvLog, EnableJsonLog);
 
                 Core.Instance.Loggers.Log(
-                    $"IOF Journal: CLOSE {entry.Direction} {entry.Contracts}x {entry.Symbol} @ {exitPrice:F2} | PnL=${netPnl:F2} R={entry.RMultiple:F1} Grade={entry.EntryGrade}",
+                    $"IOF Journal: CLOSE {entry.Direction} {entry.Contracts}x {entry.Symbol} @ {exitPrice:F2} | Net=${netPnl:F2} R={entry.RMultiple:F1} Grade={entry.EntryGrade} MAE={entry.MaxAdverseExcursion:F1}pt MFE={entry.MaxFavorableExcursion:F1}pt",
                     LoggingLevel.System);
-
-                // (chart repaints automatically on next render pass)
             }
             catch (Exception ex)
             {
                 try { Core.Instance.Loggers.Log(ex, "IOF_TradeJournal.OnPositionRemoved"); } catch { }
+            }
+        }
+
+        // ── Phase 3: tick MAE/MFE handler ────────────────────────────────────
+
+        private void OnNewLast_Journal(Symbol symbol, Last last)
+        {
+            double price = last.Price;
+            if (price <= 0) return;
+
+            lock (_maeLock)
+            {
+                var keys = new List<string>(_maeTracking.Keys);
+                foreach (var key in keys)
+                {
+                    var t     = _maeTracking[key];
+                    double delta    = price - t.entryPrice;
+                    double adverse  = t.isLong ? Math.Max(-delta, 0) : Math.Max(delta, 0);
+                    double favorable = t.isLong ? Math.Max(delta, 0) : Math.Max(-delta, 0);
+
+                    double newMae = Math.Max(t.mae, adverse);
+                    double newMfe = Math.Max(t.mfe, favorable);
+
+                    if (newMae != t.mae || newMfe != t.mfe)
+                        _maeTracking[key] = (t.entryPrice, t.isLong, newMae, newMfe);
+                }
             }
         }
 
@@ -305,13 +362,8 @@ namespace TradePhantoms.Journal
 
             try
             {
-                // Draw completed trade labels
-                foreach (var e in _completed)
-                    DrawTradeLabel(gr, win, e);
-
-                // Draw pending (open) trade labels
-                foreach (var e in _pending.Values)
-                    DrawTradeLabel(gr, win, e);
+                foreach (var e in _completed)   DrawTradeLabel(gr, win, e);
+                foreach (var e in _pending.Values) DrawTradeLabel(gr, win, e);
             }
             catch { }
         }
@@ -328,11 +380,11 @@ namespace TradePhantoms.Journal
             if (yEntry < rect.Top - 20 || yEntry > rect.Bottom + 20) return;
 
             Brush brush = GradeBrush(e.EntryGrade);
-            string entryLabel = $" {e.EntryGrade} {e.Direction} {e.Contracts}x ";
-            gr.FillRectangle(_brushBg, rect.Right - 120, yEntry - 10, 118, 18);
-            gr.DrawString(entryLabel, _labelFont, brush, rect.Right - 118, yEntry - 9);
+            string trendStr = string.IsNullOrEmpty(e.ItfTrend) ? "" : $" {e.ItfTrend[0]}";
+            string entryLabel = $" {e.EntryGrade} {e.Direction} {e.Contracts}x{trendStr} ";
+            gr.FillRectangle(_brushBg, rect.Right - 130, yEntry - 10, 128, 18);
+            gr.DrawString(entryLabel, _labelFont, brush, rect.Right - 128, yEntry - 9);
 
-            // Exit label if complete
             if (e.IsComplete && e.ExitPrice > 0)
             {
                 int yExit;
@@ -341,10 +393,10 @@ namespace TradePhantoms.Journal
 
                 if (yExit >= rect.Top - 20 && yExit <= rect.Bottom + 20)
                 {
-                    string rStr = e.RMultiple > 0 ? $"{e.RMultiple:F1}R" : e.ExitReason;
+                    string rStr = e.RMultiple != 0 ? $"{e.RMultiple:F1}R" : e.ExitReason;
                     string exitLabel = $" ✕ {rStr} ${e.NetPnL:F0} ";
-                    gr.FillRectangle(_brushBg, rect.Right - 120, yExit - 10, 118, 18);
-                    gr.DrawString(exitLabel, _labelFont, _brushExit, rect.Right - 118, yExit - 9);
+                    gr.FillRectangle(_brushBg, rect.Right - 130, yExit - 10, 128, 18);
+                    gr.DrawString(exitLabel, _labelFont, _brushExit, rect.Right - 128, yExit - 9);
                 }
             }
         }
@@ -355,19 +407,11 @@ namespace TradePhantoms.Journal
         {
             try
             {
-                // Key must match IOF v2's GetRegistryKey() → Aggregation.ToString().
-                // IofTimeframe parameter is kept as a display label only.
                 string period = this.HistoricalData?.Aggregation?.ToString() ?? IofTimeframe.ToString();
                 string iofKey = $"{this.Symbol?.Name}_{period}";
                 double tolerance = ZoneProximityTicks * (this.Symbol?.TickSize ?? 0.25);
 
-                Type regType = null;
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    if (asm.GetName().Name != "TradePhantoms_IOF_v2") continue;
-                    regType = asm.GetType("TradePhantoms.IOFZoneRegistry");
-                    if (regType != null) break;
-                }
+                Type regType = FindRegistryType("TradePhantoms.IOFZoneRegistry");
                 if (regType == null) return;
 
                 var getZones = regType.GetMethod("GetZones", BindingFlags.Public | BindingFlags.Static);
@@ -376,9 +420,8 @@ namespace TradePhantoms.Journal
                 var zones = getZones.Invoke(null, new object[] { iofKey }) as System.Collections.IEnumerable;
                 if (zones == null) return;
 
-                // Find nearest zone to entry price
-                object bestZone    = null;
-                double bestDist    = double.MaxValue;
+                object bestZone = null;
+                double bestDist = double.MaxValue;
 
                 foreach (var z in zones)
                 {
@@ -403,40 +446,35 @@ namespace TradePhantoms.Journal
                 entry.ZoneScore          = zScore;
                 entry.ZoneTouchCountAtEntry = zTouch;
                 entry.ZoneTimeframe      = $"{IofTimeframe}m";
+                entry.EntryInsideZone    = price >= zBottom - tolerance && price <= zTop + tolerance;
 
-                // Inside zone check
-                entry.EntryInsideZone = price >= zBottom - tolerance && price <= zTop + tolerance;
-
-                // Distance from nearest edge (ticks)
-                double tickSz = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+                double tickSz  = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25;
                 double nearEdge = price < zBottom ? zBottom - price
                                 : price > zTop    ? price    - zTop
                                 : 0;
                 entry.EntryDistanceFromZoneEdgeTicks = (int)Math.Round(nearEdge / tickSz);
 
-                // Zone purity
                 entry.ZonePurityAtEntry = zTouch == 0 ? "FRESH"
                                         : zTouch <= 1  ? "TESTED"
                                         : "DEGRADED";
 
-                // Optional ZoneMetrics (DepartureMultiplier etc.) — populated by IOF v2
-                // via a separate static accessor if available.
-                TryPopulateZoneMetrics(entry, bestZone, regType);
+                TryPopulateZoneMetrics(entry, regType);
             }
             catch { }
         }
 
-        private void TryPopulateZoneMetrics(JournalEntry entry, object zone, Type regType)
+        private void TryPopulateZoneMetrics(JournalEntry entry, Type regType)
         {
             try
             {
                 Type metricsType = regType.Assembly.GetType("TradePhantoms.ZoneMetricsRegistry");
                 if (metricsType == null) return;
 
-                // Use the double-overload: TryGet(regKey, top, bottom, out ZoneMetricsExport)
-                var tryGet = metricsType.GetMethod("TryGet",
-                    new[] { typeof(string), typeof(double), typeof(double), metricsType.Assembly.GetType("TradePhantoms.ZoneMetricsExport").MakeByRefType() });
+                Type exportType = regType.Assembly.GetType("TradePhantoms.ZoneMetricsExport");
+                if (exportType == null) return;
 
+                var tryGet = metricsType.GetMethod("TryGet",
+                    new[] { typeof(string), typeof(double), typeof(double), exportType.MakeByRefType() });
                 if (tryGet == null) return;
 
                 string period = this.HistoricalData?.Aggregation?.ToString() ?? IofTimeframe.ToString();
@@ -444,11 +482,9 @@ namespace TradePhantoms.Journal
 
                 object[] parms = new object[] { regKey, entry.NearestZoneTop, entry.NearestZoneBottom, null };
                 bool found = (bool)tryGet.Invoke(null, parms);
-                if (!found) return;
+                if (!found || parms[3] == null) return;
 
                 object m = parms[3];
-                if (m == null) return;
-
                 entry.DepartureMultiplier  = GetProp<double>(m, "DepartureMultiplier");
                 entry.AbsorptionMultiplier = GetProp<double>(m, "AbsorptionMultiplier");
                 entry.MtfcBonus            = GetProp<double>(m, "MtfcBonus");
@@ -457,12 +493,114 @@ namespace TradePhantoms.Journal
             catch { }
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────────
+        // ── Phase 3: environment helpers ──────────────────────────────────────
+
+        private double ComputeAtr20()
+        {
+            try
+            {
+                if (this.Count < 21) return 0;
+                double total = 0;
+                for (int i = 0; i < 20; i++)
+                {
+                    double h = this.GetPrice(PriceType.High,  i);
+                    double l = this.GetPrice(PriceType.Low,   i);
+                    double p = this.GetPrice(PriceType.Close, i + 1);
+                    double tr = Math.Max(h - l, Math.Max(Math.Abs(h - p), Math.Abs(l - p)));
+                    total += tr;
+                }
+                return total / 20.0;
+            }
+            catch { return 0; }
+        }
+
+        private string ComputeEmaTrend(int period)
+        {
+            try
+            {
+                if (this.Count < period) return "";
+                double k   = 2.0 / (period + 1);
+                double ema = this.GetPrice(PriceType.Close, period - 1);
+                for (int i = period - 2; i >= 0; i--)
+                    ema = ema * (1 - k) + this.GetPrice(PriceType.Close, i) * k;
+
+                double current  = this.GetPrice(PriceType.Close, 0);
+                double flatBand = _cachedAtr20 > 0 ? _cachedAtr20 * 0.1
+                                : (this.Symbol?.TickSize ?? 0.25) * 4;
+
+                if (current > ema + flatBand) return "BULL";
+                if (current < ema - flatBand) return "BEAR";
+                return "FLAT";
+            }
+            catch { return ""; }
+        }
+
+        private int ComputeNearestHtfZoneDistance(double price)
+        {
+            try
+            {
+                string sym    = this.Symbol?.Name ?? "";
+                double tickSz = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+
+                Type regType = FindRegistryType("TradePhantoms.IOFZoneRegistry");
+                if (regType == null) return 0;
+
+                var getZones = regType.GetMethod("GetZones", BindingFlags.Public | BindingFlags.Static);
+                if (getZones == null) return 0;
+
+                // Check common HTF aggregation strings
+                var htfCandidates = new[]
+                {
+                    "15 Min", "15Min", "15", "30 Min", "30Min", "30",
+                    "60 Min", "60Min", "60", "1 Hour", "1Hour", "120 Min"
+                };
+
+                double bestDist = double.MaxValue;
+                foreach (var period in htfCandidates)
+                {
+                    string htfKey = $"{sym}_{period}";
+                    var zones = getZones.Invoke(null, new object[] { htfKey }) as System.Collections.IEnumerable;
+                    if (zones == null) continue;
+
+                    foreach (var z in zones)
+                    {
+                        double top    = GetProp<double>(z, "Top");
+                        double bottom = GetProp<double>(z, "Bottom");
+                        double d      = price < bottom ? bottom - price
+                                      : price > top    ? price    - top
+                                      : 0;
+                        if (d < bestDist) bestDist = d;
+                    }
+                }
+
+                return bestDist == double.MaxValue ? 0 : (int)Math.Round(bestDist / tickSz);
+            }
+            catch { return 0; }
+        }
+
+        private static bool IsTradeWithTrend(bool isLong, string trend)
+        {
+            if (string.IsNullOrEmpty(trend) || trend == "FLAT") return false;
+            return isLong ? trend == "BULL" : trend == "BEAR";
+        }
+
+        private static void InferTpHits(JournalEntry e)
+        {
+            double zoneHeight = Math.Abs(e.NearestZoneTop - e.NearestZoneBottom);
+            if (zoneHeight <= 0 || e.MaxFavorableExcursion <= 0) return;
+
+            e.HitTp1 = e.MaxFavorableExcursion >= zoneHeight;
+            e.HitTp2 = e.MaxFavorableExcursion >= zoneHeight * 2.0;
+            e.HitTp3 = e.MaxFavorableExcursion >= zoneHeight * 3.0;
+            // EarlyExit: left money on the table — profitable but never reached TP1 extension
+            e.EarlyExit = e.NetPnL > 0 && !e.HitTp1;
+        }
+
+        // ── General helpers ───────────────────────────────────────────────────
 
         private bool IsOurSymbol(Position position)
         {
-            if (position == null || this.Symbol == null) return false;
-            if (position.Symbol == null) return false;
+            if (position == null || this.Symbol == null || position.Symbol == null) return false;
             return string.Equals(position.Symbol.Name, this.Symbol.Name,
                                  StringComparison.OrdinalIgnoreCase);
         }
@@ -488,23 +626,31 @@ namespace TradePhantoms.Journal
             catch { }
         }
 
+        private Type FindRegistryType(string typeName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (asm.GetName().Name != "TradePhantoms_IOF_v2") continue;
+                var t = asm.GetType(typeName);
+                if (t != null) return t;
+            }
+            return null;
+        }
+
         private static string BuildTradeId(DateTime utc, string symbol)
             => $"{utc:yyyyMMdd-HHmmss}-{symbol}";
 
         private static string InferExitReason(double pnl)
         {
-            if (pnl > 0)  return "TP";
-            if (pnl < 0)  return "SL";
+            if (pnl > 0) return "TP";
+            if (pnl < 0) return "SL";
             return "BE";
         }
 
         private Brush GradeBrush(string grade) => grade switch
         {
-            "A" => _brushA,
-            "B" => _brushB,
-            "C" => _brushC,
-            "D" => _brushD,
-            "F" => _brushF,
+            "A" => _brushA, "B" => _brushB, "C" => _brushC,
+            "D" => _brushD, "F" => _brushF,
             _   => _brushQ
         };
 
@@ -533,7 +679,6 @@ namespace TradePhantoms.Journal
 
         private static void FireAlert(string message)
         {
-            // Reflection-based Alerts panel (mirrors AlertsHelper.cs pattern)
             try
             {
                 object core = typeof(Core).GetProperty("Instance",
@@ -555,7 +700,6 @@ namespace TradePhantoms.Journal
             if (this.Symbol == null) return 2.0;
             double tickSize = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
 
-            // Try reflection for TickCost / TickValue ($/tick) → convert to $/point
             string[] candidates = { "TickCost", "TickValue", "PointValue", "ContractMultiplier" };
             foreach (var propName in candidates)
             {
@@ -572,32 +716,20 @@ namespace TradePhantoms.Journal
                 catch { }
             }
 
-            // Hardcoded fallback table for common futures
             string root = this.Symbol.Name.TrimEnd("0123456789HMUZ".ToCharArray()).ToUpperInvariant();
             return root switch
             {
-                "MNQ" => 2.0,    // $2/pt
-                "NQ"  => 20.0,   // $20/pt
-                "MES" => 5.0,    // $5/pt
-                "ES"  => 50.0,   // $50/pt
-                "M2K" => 5.0,    // $5/pt
-                "RTY" => 50.0,   // $50/pt
-                "MYM" => 0.5,    // $0.50/pt
-                "YM"  => 5.0,    // $5/pt
-                "CL"  => 1000.0, // $1000/pt
-                "MCL" => 100.0,  // $100/pt
-                "GC"  => 100.0,  // $100/pt
-                "MGC" => 10.0,   // $10/pt
-                _     => 2.0     // default MNQ
+                "MNQ" => 2.0,    "NQ"  => 20.0,  "MES" => 5.0,   "ES"  => 50.0,
+                "M2K" => 5.0,    "RTY" => 50.0,  "MYM" => 0.5,   "YM"  => 5.0,
+                "CL"  => 1000.0, "MCL" => 100.0, "GC"  => 100.0, "MGC" => 10.0,
+                _     => 2.0
             };
         }
 
         private static TimeZoneInfo GetEasternTz()
         {
-            try { return TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"); }
-            catch { }
-            try { return TimeZoneInfo.FindSystemTimeZoneById("America/New_York"); }
-            catch { }
+            try { return TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time"); } catch { }
+            try { return TimeZoneInfo.FindSystemTimeZoneById("America/New_York"); }      catch { }
             return TimeZoneInfo.Utc;
         }
 
