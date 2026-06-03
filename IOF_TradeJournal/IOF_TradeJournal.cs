@@ -90,6 +90,8 @@ namespace TradePhantoms.Journal
         {
             Name        = "WTF Are You Doing?! — IOF Journal";
             Description = "Accountability partner — auto-journals every IOF trade.";
+            SeparateWindow = false;
+            AddLineSeries("Journal_anchor", Color.Transparent, 1, LineStyle.Solid);
 
             _labelFont = new Font("Consolas", 8f, FontStyle.Bold);
             _brushA    = new SolidBrush(Color.FromArgb(0, 200, 83));
