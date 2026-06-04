@@ -1,25 +1,18 @@
 // =============================================================================
 // FiveMinMoneyMaker.cs — HTF/ITF zone retest detector + position sizer
 // =============================================================================
-// Standalone. No IOF v2 dependency.
+// Standalone. No IOF v2 dependency. Works on any chart timeframe.
 //
-// What it does:
-//   1. Fetches 1h (ITF) and 4h (HTF) history and scans for supply/demand zones
-//      using the exact same algorithm as IOF v2 (MultiTFZoneScanner port).
-//   2. On the chart timeframe, watches for the retest pattern near each zone:
-//      tight base candles (body/range <= threshold) followed by a strong
-//      departure candle back in the zone direction.
-//   3. When the departure candle CLOSES, draws:
-//        Left box  — the base candle cluster
-//        Right box — extends forward, contains contract sizing panel
-//        TP line   — dashed green at take-profit level
-//        SL line   — dashed red at stop level
-//   4. Invalidates (removes) any box when a bar CLOSES through the zone edge.
-//   5. Debug panel (bottom-left) shows ITF/HTF data load status + zone counts
-//      so you can verify everything populated.
+// Zones: fetches two configurable higher timeframes (ITF + HTF), scans for
+//        supply/demand zones using the exact IOF v2 algorithm, draws them
+//        from their formation point rightward only.
 //
-// Sizing: floor(RiskPerTrade / (stopDist × pointValue)), capped at MaxContracts.
-// Default: $250 risk, 10 ct max.
+// Retest: on each new bar, scans for tight base candle cluster at zone edge
+//         followed by strong departure candle in the zone direction.
+//         Box fires on departure close. Invalidated on candle close through
+//         the zone's wick edge.
+//
+// Panel: bottom-left by default, position + transparency configurable.
 // =============================================================================
 
 using System;
@@ -32,7 +25,7 @@ namespace TradePhantoms
 {
     public class FiveMinMoneyMaker : Indicator
     {
-        // ── Parameters ────────────────────────────────────────────────────────
+        // ── Sizing ────────────────────────────────────────────────────────────
 
         [InputParameter("Risk Per Trade ($)", 0, 10.0, 1000.0, 10.0, 2)]
         public double RiskPerTrade = 250.0;
@@ -46,38 +39,62 @@ namespace TradePhantoms
         [InputParameter("TP Points", 3, 5.0, 500.0, 5.0, 1)]
         public double TpPoints = 100.0;
 
-        [InputParameter("Base Candle Body % Max (0.1-0.9)", 4, 0.1, 0.9, 0.05, 2)]
+        // ── Timeframes ────────────────────────────────────────────────────────
+        // 0=1m  1=5m  2=15m  3=30m  4=1h  5=4h  6=Daily  7=Weekly
+
+        [InputParameter("ITF Period  (0=1m 1=5m 2=15m 3=30m 4=1h 5=4h 6=D 7=W)", 10, 0, 7, 1, 0)]
+        public int ITFPeriodIndex = 4;   // default 1h
+
+        [InputParameter("HTF Period  (0=1m 1=5m 2=15m 3=30m 4=1h 5=4h 6=D 7=W)", 11, 0, 7, 1, 0)]
+        public int HTFPeriodIndex = 5;   // default 4h
+
+        // ── Zone detection ────────────────────────────────────────────────────
+
+        [InputParameter("Base Candle Body % Max (0.1-0.9)", 20, 0.1, 0.9, 0.05, 2)]
         public double BaseCandleBodyPct = 0.5;
 
-        [InputParameter("Max Base Candles (retest cluster)", 5, 1, 7, 1, 0)]
+        [InputParameter("Max Base Candles (retest cluster)", 21, 1, 7, 1, 0)]
         public int MaxBaseCandles = 3;
 
-        [InputParameter("Min Impulse Ratio (zone detection)", 6, 0.5, 10.0, 0.5, 1)]
+        [InputParameter("Min Impulse Ratio (zone detection)", 22, 0.5, 10.0, 0.5, 1)]
         public double MinImpulseRatio = 2.0;
 
-        [InputParameter("Zone Lookback Bars (HTF/ITF)", 7, 20, 500, 10, 0)]
+        [InputParameter("Zone Lookback Bars (HTF/ITF)", 23, 20, 500, 10, 0)]
         public int ZoneLookback = 100;
 
-        [InputParameter("Zone Proximity Ticks (retest trigger)", 8, 1, 100, 1, 0)]
+        [InputParameter("Zone Proximity Ticks (retest trigger)", 24, 1, 100, 1, 0)]
         public int ZoneProximityTicks = 20;
 
-        [InputParameter("Extend Box Bars Right", 9, 5, 200, 5, 0)]
-        public int ExtendBarsRight = 40;
+        [InputParameter("Zone Fill Opacity (0-255)", 25, 0, 255, 5, 0)]
+        public int ZoneOpacity = 28;
 
-        [InputParameter("Show Debug Panel", 10)]
+        // ── Display ───────────────────────────────────────────────────────────
+        // Dashboard position: 0=Bottom-Left  1=Bottom-Right  2=Top-Left  3=Top-Right
+
+        [InputParameter("Dashboard Position (0=BL 1=BR 2=TL 3=TR)", 30, 0, 3, 1, 0)]
+        public int DashboardPosition = 0;
+
+        [InputParameter("Dashboard Opacity (0-255)", 31, 0, 255, 5, 0)]
+        public int DashboardOpacity = 185;
+
+        [InputParameter("Show Dashboard", 32)]
         public bool ShowDebug = true;
+
+        [InputParameter("Extend Box Bars Right", 33, 5, 200, 5, 0)]
+        public int ExtendBarsRight = 40;
 
         // ── Internal types ────────────────────────────────────────────────────
 
-        private enum ZType { RBR, DBR, RBD, DBD }
+        private enum ZType  { RBR, DBR, RBD, DBD }
         private enum LegDir { None, Up, Down }
 
         private class ZoneBox
         {
-            public double Top, Bottom, WickEdge;
-            public ZType  Type;
-            public bool   IsDemand;
-            public string Tier;
+            public double   Top, Bottom, WickEdge;
+            public ZType    Type;
+            public bool     IsDemand;
+            public string   Tier;
+            public DateTime FormationTime;  // start of base cluster — zones draw from here rightward
         }
 
         private class RetestBox
@@ -104,9 +121,11 @@ namespace TradePhantoms
 
         private HistoricalData _itfData;
         private HistoricalData _htfData;
-        private int _lastItfCount = 0;
-        private int _lastHtfCount = 0;
-        private int _barCounter   = 0;
+        private int _lastItfCount  = 0;
+        private int _lastHtfCount  = 0;
+        private int _barCounter    = 0;
+        private int _prevItfIndex  = -1;
+        private int _prevHtfIndex  = -1;
 
         private Font _fontTitle;
         private Font _fontDetail;
@@ -117,7 +136,7 @@ namespace TradePhantoms
         public FiveMinMoneyMaker()
         {
             Name           = "5m Money Maker";
-            Description    = "HTF/ITF zone retest pattern with position sizing.";
+            Description    = "HTF/ITF zone retest with position sizing. Works on any timeframe.";
             SeparateWindow = false;
             AddLineSeries("MM_anchor", Color.Transparent, 1, LineStyle.Solid);
         }
@@ -128,14 +147,22 @@ namespace TradePhantoms
             _fontDetail = new Font("Consolas", 7f, FontStyle.Regular);
             _fontBig    = new Font("Consolas", 13f, FontStyle.Bold);
 
-            if (this.Symbol != null)
-            {
-                DateTime from = DateTime.UtcNow.AddDays(-45);
-                try { _itfData = this.Symbol.GetHistory(Period.HOUR1, this.Symbol.HistoryType, from); } catch { }
-                try { _htfData = this.Symbol.GetHistory(Period.HOUR4, this.Symbol.HistoryType, from); } catch { }
-            }
+            FetchHistoricalData();
 
             lock (_lock) { _zones.Clear(); _retestBoxes.Clear(); }
+            _barCounter = 0;
+        }
+
+        private void FetchHistoricalData()
+        {
+            if (this.Symbol == null) return;
+            DateTime from = DateTime.UtcNow.AddDays(-60);
+            try { _itfData = this.Symbol.GetHistory(IndexToPeriod(ITFPeriodIndex), this.Symbol.HistoryType, from); } catch { }
+            try { _htfData = this.Symbol.GetHistory(IndexToPeriod(HTFPeriodIndex), this.Symbol.HistoryType, from); } catch { }
+            _prevItfIndex = ITFPeriodIndex;
+            _prevHtfIndex = HTFPeriodIndex;
+            _lastItfCount = 0;
+            _lastHtfCount = 0;
         }
 
         protected override void OnUpdate(UpdateArgs args)
@@ -144,9 +171,16 @@ namespace TradePhantoms
             if (args.Reason != UpdateReason.NewBar && args.Reason != UpdateReason.HistoricalBar) return;
             if (this.HistoricalData == null || this.HistoricalData.Count < 10) return;
 
+            // Re-fetch if user changed the period settings
+            if (ITFPeriodIndex != _prevItfIndex || HTFPeriodIndex != _prevHtfIndex)
+            {
+                lock (_lock) { _zones.Clear(); _retestBoxes.Clear(); }
+                FetchHistoricalData();
+                return;
+            }
+
             _barCounter++;
 
-            // Rescan HTF zones when new data arrives or every 20 bars
             bool itfNew = _itfData != null && _itfData.Count != _lastItfCount;
             bool htfNew = _htfData != null && _htfData.Count != _lastHtfCount;
             if (itfNew || htfNew || _barCounter % 20 == 0)
@@ -160,7 +194,7 @@ namespace TradePhantoms
             CheckInvalidations();
         }
 
-        // ── HTF/ITF zone scan (port of MultiTFZoneScanner.ScanTimeframe) ──────
+        // ── Zone scan (port of MultiTFZoneScanner.ScanTimeframe) ─────────────
 
         private void ScanHTFZones()
         {
@@ -206,6 +240,8 @@ namespace TradePhantoms
                     double bodyHi = double.MinValue, bodyLo = double.MaxValue;
                     double wickHi = double.MinValue, wickLo = double.MaxValue;
                     bool   baseOk = true;
+                    DateTime formationTime = DateTime.MinValue;
+
                     for (int i = startIndex; i <= endIndex; i++)
                     {
                         var b = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
@@ -216,6 +252,7 @@ namespace TradePhantoms
                         if (bl < bodyLo) bodyLo = bl;
                         if (b.High > wickHi) wickHi = b.High;
                         if (b.Low  < wickLo) wickLo = b.Low;
+                        if (i == startIndex) formationTime = b.TimeLeft;
                     }
                     if (!baseOk) continue;
 
@@ -230,7 +267,6 @@ namespace TradePhantoms
 
                     if (IsDuplicate(result, isDemand, zoneTop, zoneBot)) continue;
 
-                    // Invalidation check
                     bool dead = false;
                     for (int j = endIndex + 2; j < total; j++)
                     {
@@ -241,12 +277,13 @@ namespace TradePhantoms
                     }
                     if (dead) continue;
 
-                    var z      = new ZoneBox();
-                    z.Top      = zoneTop;
-                    z.Bottom   = zoneBot;
-                    z.WickEdge = wickEdge;
-                    z.Type     = ztype;
-                    z.IsDemand = isDemand;
+                    var z           = new ZoneBox();
+                    z.Top           = zoneTop;
+                    z.Bottom        = zoneBot;
+                    z.WickEdge      = wickEdge;
+                    z.Type          = ztype;
+                    z.IsDemand      = isDemand;
+                    z.FormationTime = formationTime;
                     result.Add(z);
                 }
             }
@@ -255,8 +292,6 @@ namespace TradePhantoms
         }
 
         // ── Retest pattern scan ───────────────────────────────────────────────
-        // Pattern: 1-MaxBaseCandles tight candles at zone edge, then a strong
-        // departure candle in the zone direction. Box created on departure close.
 
         private void ScanRetestPatterns()
         {
@@ -264,13 +299,12 @@ namespace TradePhantoms
             lock (_lock) { zones = new List<ZoneBox>(_zones); }
             if (zones.Count == 0) return;
 
-            var    data     = this.HistoricalData;
-            int    total    = data.Count;
-            double tick     = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
-            double prox     = ZoneProximityTicks * tick;
-            double ptVal    = ResolvePointValue();
+            var    data  = this.HistoricalData;
+            int    total = data.Count;
+            double tick  = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+            double prox  = ZoneProximityTicks * tick;
+            double ptVal = ResolvePointValue();
 
-            // Get current price
             var curBar = data[total - 1, SeekOriginHistory.Begin] as HistoryItemBar;
             if (curBar == null) return;
 
@@ -280,7 +314,6 @@ namespace TradePhantoms
             {
                 var zone = zones[zi];
 
-                // Scan for departure bar then look back for base cluster
                 for (int d = total - 2; d >= total - 1 - scanBack; d--)
                 {
                     if (d < 2) break;
@@ -288,19 +321,16 @@ namespace TradePhantoms
                     var depBar = data[d, SeekOriginHistory.Begin] as HistoryItemBar;
                     if (depBar == null) continue;
 
-                    // Departure must be a strong directional candle aligned with zone
                     LegDir depDir = ClassifyLegFromBar(depBar);
                     if (depDir == LegDir.None) continue;
                     if (zone.IsDemand  && depDir != LegDir.Up)   continue;
                     if (!zone.IsDemand && depDir != LegDir.Down) continue;
 
-                    // Departure bar must have been near the zone when it closed
                     double depDist = zone.IsDemand
                         ? Math.Max(0, depBar.Low  - zone.Bottom)
                         : Math.Max(0, zone.Top    - depBar.High);
                     if (depDist > prox * 3) continue;
 
-                    // Look back from d-1 for base candle cluster
                     for (int baseLen = 1; baseLen <= MaxBaseCandles; baseLen++)
                     {
                         int baseEnd   = d - 1;
@@ -309,7 +339,6 @@ namespace TradePhantoms
 
                         if (!IsValidBase(data, baseStart, baseEnd)) continue;
 
-                        // Cluster high/low
                         double bHigh = double.MinValue, bLow = double.MaxValue;
                         bool   ok    = true;
                         for (int i = baseStart; i <= baseEnd; i++)
@@ -321,13 +350,11 @@ namespace TradePhantoms
                         }
                         if (!ok) continue;
 
-                        // Base cluster must be at or within the zone proximity
                         double baseProx = zone.IsDemand
                             ? Math.Max(0, bLow  - zone.Bottom)
                             : Math.Max(0, zone.Top - bHigh);
                         if (baseProx > prox * 3) continue;
 
-                        // Skip if this retest box already exists
                         var startBar = data[baseStart, SeekOriginHistory.Begin] as HistoryItemBar;
                         if (startBar == null) continue;
 
@@ -344,10 +371,11 @@ namespace TradePhantoms
                         }
                         if (exists) break;
 
-                        // Compute sizing
                         double entry     = depBar.Close;
                         double buf       = StopBufferTicks * tick;
-                        double stopPrice = zone.IsDemand ? zone.Bottom - buf : zone.Top + buf;
+                        // Stop anchored to the BASE CLUSTER edge, not the full zone height.
+                        // The zone tells you WHERE to look; the cluster defines your risk.
+                        double stopPrice = zone.IsDemand ? bLow - buf : bHigh + buf;
                         double tpPrice   = zone.IsDemand ? entry + TpPoints  : entry - TpPoints;
                         double stopDist  = Math.Abs(entry - stopPrice);
                         double riskPerCt = stopDist * ptVal;
@@ -358,20 +386,20 @@ namespace TradePhantoms
                         double totalRisk = cts * riskPerCt;
                         double rr        = stopDist > 0 ? Math.Abs(tpPrice - entry) / stopDist : 0;
 
-                        var newBox              = new RetestBox();
-                        newBox.BaseStartTime    = startBar.TimeLeft;
-                        newBox.DepartureTime    = depBar.TimeLeft;
-                        newBox.BoxHigh          = bHigh;
-                        newBox.BoxLow           = bLow;
-                        newBox.IsDemand         = zone.IsDemand;
-                        newBox.Zone             = zone;
-                        newBox.Invalidated      = false;
-                        newBox.EntryPrice       = entry;
-                        newBox.StopPrice        = stopPrice;
-                        newBox.TpPrice          = tpPrice;
-                        newBox.Contracts        = cts;
-                        newBox.TotalRisk        = totalRisk;
-                        newBox.RR               = rr;
+                        var newBox           = new RetestBox();
+                        newBox.BaseStartTime = startBar.TimeLeft;
+                        newBox.DepartureTime = depBar.TimeLeft;
+                        newBox.BoxHigh       = bHigh;
+                        newBox.BoxLow        = bLow;
+                        newBox.IsDemand      = zone.IsDemand;
+                        newBox.Zone          = zone;
+                        newBox.Invalidated   = false;
+                        newBox.EntryPrice    = entry;
+                        newBox.StopPrice     = stopPrice;
+                        newBox.TpPrice       = tpPrice;
+                        newBox.Contracts     = cts;
+                        newBox.TotalRisk     = totalRisk;
+                        newBox.RR            = rr;
 
                         lock (_lock) { _retestBoxes.Add(newBox); }
                         break;
@@ -392,14 +420,11 @@ namespace TradePhantoms
             {
                 var rb = boxes[bi];
                 if (rb.Invalidated) continue;
-
-                // Walk from newest bar backward, only check bars after departure
                 for (int i = total - 1; i >= 0; i--)
                 {
                     var b = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
                     if (b == null) continue;
                     if (b.TimeLeft <= rb.DepartureTime) break;
-
                     bool broken = rb.IsDemand
                         ? b.Close < rb.Zone.WickEdge
                         : b.Close > rb.Zone.WickEdge;
@@ -421,9 +446,9 @@ namespace TradePhantoms
             var win = this.CurrentChart.MainWindow;
             if (win == null) return;
 
-            var clipRect = (Rectangle)win.ClientRectangle;
+            var clip = (Rectangle)win.ClientRectangle;
 
-            // Bar width in pixels (used for right-box extension)
+            // Bar width in pixels for right-box extension
             int barWidthPx = 6;
             try
             {
@@ -442,15 +467,15 @@ namespace TradePhantoms
             }
             catch { }
 
-            DrawZones(gr, win, clipRect);
+            DrawZones(gr, win, clip);
 
             List<RetestBox> boxes;
             lock (_lock) { boxes = new List<RetestBox>(_retestBoxes); }
             for (int i = 0; i < boxes.Count; i++)
                 if (!boxes[i].Invalidated)
-                    DrawRetestBox(gr, win, clipRect, boxes[i], barWidthPx);
+                    DrawRetestBox(gr, win, clip, boxes[i], barWidthPx);
 
-            if (ShowDebug) DrawDebugPanel(gr, clipRect);
+            if (ShowDebug) DrawDebugPanel(gr, clip);
         }
 
         private void DrawZones(Graphics gr, dynamic win, Rectangle clip)
@@ -461,41 +486,51 @@ namespace TradePhantoms
             for (int zi = 0; zi < zones.Count; zi++)
             {
                 var z = zones[zi];
-                int yTop, yBot;
+                int yTop, yBot, xFrom;
                 try
                 {
-                    yTop = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(z.Top));
-                    yBot = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(z.Bottom));
+                    yTop  = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(z.Top));
+                    yBot  = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(z.Bottom));
+                    xFrom = (int)Math.Round((double)win.CoordinatesConverter.GetChartX(z.FormationTime));
                 }
                 catch { continue; }
 
                 if (yTop > yBot) { int t = yTop; yTop = yBot; yBot = t; }
                 if (yBot < clip.Top || yTop > clip.Bottom) continue;
 
+                // Zone extends from its formation point rightward only
+                int drawLeft  = Math.Max(clip.Left, xFrom);
+                int drawWidth = clip.Right - drawLeft;
+                if (drawWidth <= 0) continue;
+
                 int dTop = Math.Max(yTop, clip.Top);
                 int dBot = Math.Min(yBot, clip.Bottom);
                 int dH   = Math.Max(1, dBot - dTop);
 
                 bool isHtf  = z.Tier == "HTF";
-                int  opacity = isHtf ? 30 : 18;
+                int  opacity = Math.Max(1, ZoneOpacity) * (isHtf ? 1 : 0) + ZoneOpacity;
+                // HTF slightly more opaque than ITF
+                int fillA   = isHtf ? Math.Min(255, ZoneOpacity + 8) : ZoneOpacity;
 
                 Color fill = z.IsDemand
-                    ? Color.FromArgb(opacity, 0, 200, 90)
-                    : Color.FromArgb(opacity, 255, 55, 55);
+                    ? Color.FromArgb(fillA, 0, 200, 90)
+                    : Color.FromArgb(fillA, 255, 55, 55);
                 Color edge = z.IsDemand
-                    ? Color.FromArgb(isHtf ? 150 : 90, 0, 230, 100)
-                    : Color.FromArgb(isHtf ? 150 : 90, 255, 80, 80);
+                    ? Color.FromArgb(isHtf ? 160 : 100, 0, 230, 100)
+                    : Color.FromArgb(isHtf ? 160 : 100, 255, 80, 80);
 
                 using (var fb = new SolidBrush(fill))
-                    gr.FillRectangle(fb, clip.Left, dTop, clip.Width, dH);
+                    gr.FillRectangle(fb, drawLeft, dTop, drawWidth, dH);
 
+                // Edge line on the body side (the entry edge)
                 int edgeY = z.IsDemand ? yTop : yBot;
                 using (var ep = new Pen(edge, isHtf ? 2f : 1f))
-                    gr.DrawLine(ep, clip.Left, edgeY, clip.Right, edgeY);
+                    gr.DrawLine(ep, drawLeft, edgeY, clip.Right, edgeY);
 
+                // Label at formation point
                 string lbl = (isHtf ? "HTF " : "ITF ") + z.Type.ToString();
                 using (var lb = new SolidBrush(Color.FromArgb(160, edge)))
-                    gr.DrawString(lbl, _fontTitle, lb, clip.Left + 6,
+                    gr.DrawString(lbl, _fontTitle, lb, drawLeft + 4,
                         z.IsDemand ? yTop - 13 : yBot + 3);
             }
         }
@@ -519,14 +554,14 @@ namespace TradePhantoms
             int xRight     = xDep + rightExtPx;
             int boxH       = Math.Max(5, yLow - yHigh);
 
-            Color accent = rb.IsDemand
+            Color accent   = rb.IsDemand
                 ? Color.FromArgb(255, 0, 215, 100)
                 : Color.FromArgb(255, 255, 65, 65);
             Color baseFill = rb.IsDemand
                 ? Color.FromArgb(55, 0, 180, 80)
                 : Color.FromArgb(55, 220, 50, 50);
 
-            // ── Left box: base candle cluster ─────────────────────────────────
+            // Left box: base candle cluster
             if (xDep > xBase)
             {
                 using (var fb = new SolidBrush(baseFill))
@@ -535,7 +570,7 @@ namespace TradePhantoms
                     gr.DrawRectangle(ep, xBase, yHigh, xDep - xBase, boxH);
             }
 
-            // ── Right extended box: sizing panel ──────────────────────────────
+            // Right extended box: sizing panel
             int panelH = Math.Max(110, boxH);
             int panelY = rb.IsDemand ? yLow - panelH : yHigh;
 
@@ -544,11 +579,10 @@ namespace TradePhantoms
             using (var brd = new Pen(accent, 1.5f))
                 gr.DrawRectangle(brd, xDep, panelY, rightExtPx, panelH);
 
-            // Header bar
+            // Header
             using (var hb = new SolidBrush(Color.FromArgb(75, accent.R, accent.G, accent.B)))
                 gr.FillRectangle(hb, xDep + 1, panelY + 1, rightExtPx - 2, 15);
 
-            // Direction + tier + formation
             string header = (rb.IsDemand ? "LONG" : "SHORT") + "  "
                 + rb.Zone.Tier + " " + rb.Zone.Type.ToString();
             using (var tb = new SolidBrush(accent))
@@ -578,44 +612,36 @@ namespace TradePhantoms
                 for (int i = 0; i < lines.Length; i++)
                     gr.DrawString(lines[i], _fontDetail, dt, xDep + 5, panelY + 57 + i * 13);
 
-            // ── TP dashed line ────────────────────────────────────────────────
+            // TP line
             try
             {
                 int yTp = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(rb.TpPrice));
                 if (yTp >= clip.Top && yTp <= clip.Bottom)
                 {
                     using (var tp = new Pen(Color.FromArgb(200, 0, 220, 100), 1f))
-                    {
-                        tp.DashStyle = DashStyle.Dash;
-                        gr.DrawLine(tp, xDep, yTp, xRight + 60, yTp);
-                    }
+                    { tp.DashStyle = DashStyle.Dash; gr.DrawLine(tp, xDep, yTp, xRight + 60, yTp); }
                     using (var tb = new SolidBrush(Color.FromArgb(200, 0, 220, 100)))
-                        gr.DrawString("TP  " + rb.TpPrice.ToString("F2"),
-                            _fontDetail, tb, xRight + 3, yTp - 10);
+                        gr.DrawString("TP  " + rb.TpPrice.ToString("F2"), _fontDetail, tb, xRight + 3, yTp - 10);
                 }
             }
             catch { }
 
-            // ── Stop dashed line ──────────────────────────────────────────────
+            // Stop line
             try
             {
                 int ySl = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(rb.StopPrice));
                 if (ySl >= clip.Top && ySl <= clip.Bottom)
                 {
                     using (var sp = new Pen(Color.FromArgb(200, 255, 60, 60), 1f))
-                    {
-                        sp.DashStyle = DashStyle.Dash;
-                        gr.DrawLine(sp, xBase, ySl, xRight + 60, ySl);
-                    }
+                    { sp.DashStyle = DashStyle.Dash; gr.DrawLine(sp, xBase, ySl, xRight + 60, ySl); }
                     using (var sb = new SolidBrush(Color.FromArgb(200, 255, 60, 60)))
-                        gr.DrawString("SL  " + rb.StopPrice.ToString("F2"),
-                            _fontDetail, sb, xRight + 3, ySl + 2);
+                        gr.DrawString("SL  " + rb.StopPrice.ToString("F2"), _fontDetail, sb, xRight + 3, ySl + 2);
                 }
             }
             catch { }
         }
 
-        // ── Debug panel (bottom-left) ─────────────────────────────────────────
+        // ── Debug panel ───────────────────────────────────────────────────────
 
         private void DrawDebugPanel(Graphics gr, Rectangle clip)
         {
@@ -630,52 +656,56 @@ namespace TradePhantoms
             int itfCount = 0, htfCount = 0, demandCount = 0, supplyCount = 0;
             for (int i = 0; i < zones.Count; i++)
             {
-                if (zones[i].Tier == "ITF") itfCount++;
-                else htfCount++;
-                if (zones[i].IsDemand) demandCount++;
-                else supplyCount++;
+                if (zones[i].Tier == "ITF") itfCount++; else htfCount++;
+                if (zones[i].IsDemand) demandCount++; else supplyCount++;
             }
-
             int active = 0;
             for (int i = 0; i < boxes.Count; i++)
                 if (!boxes[i].Invalidated) active++;
 
-            string itfStatus = _itfData  != null
-                ? (_itfData.Count > 0 ? _itfData.Count + " bars" : "loading...")
-                : "no data";
+            string itfStatus = _itfData != null
+                ? (_itfData.Count > 0 ? _itfData.Count + " bars" : "loading...") : "no data";
             string htfStatus = _htfData != null
-                ? (_htfData.Count > 0 ? _htfData.Count + " bars" : "loading...")
-                : "no data";
+                ? (_htfData.Count > 0 ? _htfData.Count + " bars" : "loading...") : "no data";
+
+            string itfLabel = PeriodLabel(ITFPeriodIndex);
+            string htfLabel = PeriodLabel(HTFPeriodIndex);
 
             string[] lines =
             {
                 "5m Money Maker",
-                "ITF (1h): " + itfStatus + "  →  " + itfCount + " zones",
-                "HTF (4h): " + htfStatus + "  →  " + htfCount + " zones",
+                "ITF (" + itfLabel + "): " + itfStatus + "  zones: " + itfCount,
+                "HTF (" + htfLabel + "): " + htfStatus + "  zones: " + htfCount,
                 "Demand: " + demandCount + "   Supply: " + supplyCount,
                 "Active setups: " + active,
             };
 
-            int px = clip.Left + 8;
-            int py = clip.Bottom - 88;
-            int pw = 230, ph = 82;
+            int pw = 240, ph = 84;
+            int margin = 10;
+            int px, py;
 
-            using (var bg = new SolidBrush(Color.FromArgb(185, 8, 8, 16)))
+            switch (DashboardPosition)
+            {
+                case 1:  px = clip.Right  - pw - margin; py = clip.Bottom - ph - margin; break; // BR
+                case 2:  px = clip.Left   + margin;      py = clip.Top    + margin;      break; // TL
+                case 3:  px = clip.Right  - pw - margin; py = clip.Top    + margin;      break; // TR
+                default: px = clip.Left   + margin;      py = clip.Bottom - ph - margin; break; // BL
+            }
+
+            int bgAlpha = Math.Max(0, Math.Min(255, DashboardOpacity));
+            using (var bg = new SolidBrush(Color.FromArgb(bgAlpha, 8, 8, 16)))
                 gr.FillRectangle(bg, px - 4, py - 4, pw, ph);
-            using (var brd = new Pen(Color.FromArgb(60, 100, 100, 130), 1))
+            using (var brd = new Pen(Color.FromArgb(Math.Min(255, bgAlpha + 40), 90, 90, 120), 1))
                 gr.DrawRectangle(brd, px - 4, py - 4, pw, ph);
 
-            Color titleColor = Color.FromArgb(220, 140, 160, 255);
-            Color textColor  = Color.FromArgb(170, 150, 155, 165);
-
-            using (var tc = new SolidBrush(titleColor))
+            using (var tc = new SolidBrush(Color.FromArgb(220, 140, 160, 255)))
                 gr.DrawString(lines[0], _fontTitle, tc, px, py);
-            using (var fc = new SolidBrush(textColor))
+            using (var fc = new SolidBrush(Color.FromArgb(170, 150, 155, 165)))
                 for (int i = 1; i < lines.Length; i++)
                     gr.DrawString(lines[i], _fontDetail, fc, px, py + 14 + (i - 1) * 14);
         }
 
-        // ── Detection helpers ─────────────────────────────────────────────────
+        // ── Helpers ───────────────────────────────────────────────────────────
 
         private bool IsValidBase(HistoricalData data, int start, int end)
         {
@@ -693,8 +723,7 @@ namespace TradePhantoms
 
         private LegDir ClassifyLeg(HistoricalData data, int idx)
         {
-            var bar = data[idx, SeekOriginHistory.Begin] as HistoryItemBar;
-            return ClassifyLegFromBar(bar);
+            return ClassifyLegFromBar(data[idx, SeekOriginHistory.Begin] as HistoryItemBar);
         }
 
         private LegDir ClassifyLegFromBar(HistoryItemBar bar)
@@ -751,6 +780,38 @@ namespace TradePhantoms
                 if (overlap / union >= 0.75) return true;
             }
             return false;
+        }
+
+        private Period IndexToPeriod(int idx)
+        {
+            switch (idx)
+            {
+                case 0: return Period.MIN1;
+                case 1: return Period.MIN5;
+                case 2: return Period.MIN15;
+                case 3: return Period.MIN30;
+                case 4: return Period.HOUR1;
+                case 5: return Period.HOUR4;
+                case 6: return Period.DAY1;
+                case 7: return Period.WEEK1;
+                default: return Period.HOUR1;
+            }
+        }
+
+        private string PeriodLabel(int idx)
+        {
+            switch (idx)
+            {
+                case 0: return "1m";
+                case 1: return "5m";
+                case 2: return "15m";
+                case 3: return "30m";
+                case 4: return "1h";
+                case 5: return "4h";
+                case 6: return "Daily";
+                case 7: return "Weekly";
+                default: return "?";
+            }
         }
 
         private double ResolvePointValue()
