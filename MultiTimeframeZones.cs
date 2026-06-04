@@ -223,8 +223,8 @@ namespace TradePhantomsIOF.MultiTF
 
         private enum LegDir { None, Up, Down }
 
-        /// <summary>True if the cluster [start..end] total high-to-low fits within
-        /// clusterMaxRangeTicks. Individual candle shape doesn't matter.</summary>
+        /// <summary>True if every bar in [start..end] is a valid base candle
+        /// (body / range &lt;= baseCandleMaxBodyPct).</summary>
         private static bool IsValidBase(HistoricalData data, int start, int end, double tickSize, double clusterMaxRangeTicks)
         {
             double clusterHigh = double.MinValue;
