@@ -70,6 +70,7 @@ namespace TradePhantoms
             public double Top;       // drawn top  (demand=BodyHi, supply=WickHi)
             public double Bottom;    // drawn bot  (demand=WickLo, supply=BodyLo)
             public double WickEdge;  // invalidation level (demand=WickLo, supply=WickHi)
+            public int    EndIndex;  // last bar of base cluster — invalidation starts here+1
             public ZType  Type;
             public bool   IsDemand;
             public int    Touches;
@@ -194,6 +195,7 @@ namespace TradePhantoms
                         z.Top      = zoneTop;
                         z.Bottom   = zoneBot;
                         z.WickEdge = wickEdge;
+                        z.EndIndex = endIndex;
                         z.Type     = ztype;
                         z.IsDemand = isDemand;
                         z.Touches  = touches;
@@ -204,18 +206,17 @@ namespace TradePhantoms
                 }
             }
 
-            // Invalidate zones where a later bar's close crossed the far wick
+            // Invalidate zones where a bar AFTER the base closed past the far wick.
+            // Must start from EndIndex+1 — bars before the zone formed are irrelevant.
             for (int z = candidates.Count - 1; z >= 0; z--)
             {
                 var zone = candidates[z];
                 bool dead = false;
-                // find the endIndex of this zone by matching geometry (approximate)
-                // We invalidate by scanning all bars and checking close vs wickEdge
-                for (int i = firstBar; i < total; i++)
+                for (int i = zone.EndIndex + 1; i < total; i++)
                 {
                     var b = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
                     if (b == null) continue;
-                    if (zone.IsDemand && b.Close < zone.WickEdge) { dead = true; break; }
+                    if (zone.IsDemand  && b.Close < zone.WickEdge) { dead = true; break; }
                     if (!zone.IsDemand && b.Close > zone.WickEdge) { dead = true; break; }
                 }
                 if (dead) candidates.RemoveAt(z);
