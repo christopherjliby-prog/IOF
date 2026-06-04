@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Build TradePhantoms_IOF_v2 and package as a Quantower-ready zip.
-# Usage: ./build_zip.sh
-# Output: TradePhantoms_IOF_v2_FULL_INDICATOR_<date>.zip
+# Usage: ./build_zip.sh [tag]
+# Output: TradePhantoms_IOF_v2_<tag>_<date>.zip
+# Example: ./build_zip.sh zone-detection-fix
 
 set -e
 cd "$(dirname "$0")"
 
 DATE=$(date +%Y-%m-%d)
-OUT_ZIP="TradePhantoms_IOF_v2_FULL_INDICATOR_${DATE}.zip"
+TAG="${1:-update}"
+OUT_ZIP="TradePhantoms_IOF_v2_${TAG}_${DATE}.zip"
 SUBFOLDER="TradePhantoms_IOF_v2"
 BUILD_DIR="bin/Release"
 
@@ -42,11 +44,10 @@ for f in "${SOURCE_FILES[@]}"; do
 done
 
 # Rename entries inside zip to live under TradePhantoms_IOF_v2/ subfolder
-python3 - <<'PYEOF'
-import zipfile, os
-import datetime
+python3 - "$OUT_ZIP" <<'PYEOF'
+import zipfile, os, sys
 
-orig = "TradePhantoms_IOF_v2_FULL_INDICATOR_" + datetime.date.today().strftime('%Y-%m-%d') + ".zip"
+orig = sys.argv[1]
 tmp  = orig + ".tmp"
 sub  = "TradePhantoms_IOF_v2/"
 
