@@ -25,29 +25,32 @@ namespace TradePhantoms
         [InputParameter("Stop Buffer Ticks (past zone edge)", 2, 1, 30, 1, 0)]
         public int StopBufferTicks = 4;
 
-        // -- Zone detection (matches v2 defaults) --
-        [InputParameter("Base Candle Body % Max (0.1-0.9)", 3, 0.1, 0.9, 0.05, 2)]
-        public double BaseCandleBodyPct = 0.5;
+        // -- Zone detection --
+        [InputParameter("Cluster Max Range (ticks)", 3, 5, 500, 5, 0)]
+        public double ClusterMaxRangeTicks = 120;
 
-        [InputParameter("Min Impulse Ratio (x base height)", 4, 0.5, 10.0, 0.5, 1)]
+        [InputParameter("Leg Strength Threshold (body/range)", 4, 0.1, 0.9, 0.05, 2)]
+        public double LegStrengthPct = 0.5;
+
+        [InputParameter("Min Impulse Ratio (x zone height)", 5, 0.5, 10.0, 0.5, 1)]
         public double MinImpulseRatio = 2.0;
 
-        [InputParameter("Max Base Candles (1-7)", 5, 1, 7, 1, 0)]
-        public int MaxBaseCandles = 3;
+        [InputParameter("Max Base Candles", 6, 1, 15, 1, 0)]
+        public int MaxBaseCandles = 15;
 
-        [InputParameter("Lookback Bars", 6, 20, 1000, 25, 0)]
+        [InputParameter("Lookback Bars", 7, 20, 1000, 25, 0)]
         public int LookbackBars = 150;
 
-        [InputParameter("Max Zones Per Side", 7, 1, 10, 1, 0)]
+        [InputParameter("Max Zones Per Side", 8, 1, 10, 1, 0)]
         public int MaxZones = 5;
 
-        [InputParameter("Zone Proximity Ticks (show panel)", 8, 1, 150, 1, 0)]
+        [InputParameter("Zone Proximity Ticks (show panel)", 9, 1, 150, 1, 0)]
         public int ZoneProximityTicks = 20;
 
-        [InputParameter("Zone Fill Opacity (0-255)", 9, 5, 200, 5, 0)]
+        [InputParameter("Zone Fill Opacity (0-255)", 10, 5, 200, 5, 0)]
         public int ZoneOpacity = 40;
 
-        [InputParameter("Show Zone Labels", 10)]
+        [InputParameter("Show Zone Labels", 11)]
         public bool ShowLabels = true;
 
         // ── Internal ──────────────────────────────────────────────────────────
@@ -255,16 +258,18 @@ namespace TradePhantoms
 
         private bool IsValidBase(HistoricalData data, int start, int end)
         {
+            double tick = this.Symbol.TickSize > 0 ? this.Symbol.TickSize : 0.25;
+            double clusterHigh = double.MinValue;
+            double clusterLow  = double.MaxValue;
             for (int i = start; i <= end; i++)
             {
                 var bar = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
                 if (bar == null) return false;
-                double range = bar.High - bar.Low;
-                if (range <= 0) return false;
-                double body = Math.Abs(bar.Close - bar.Open);
-                if (body / range > BaseCandleBodyPct) return false;
+                if (bar.High > clusterHigh) clusterHigh = bar.High;
+                if (bar.Low  < clusterLow)  clusterLow  = bar.Low;
             }
-            return true;
+            if (clusterHigh == double.MinValue || clusterLow == double.MaxValue) return false;
+            return (clusterHigh - clusterLow) <= ClusterMaxRangeTicks * tick;
         }
 
         private LegDir ClassifyLeg(HistoricalData data, int idx)
@@ -274,7 +279,7 @@ namespace TradePhantoms
             double range = bar.High - bar.Low;
             if (range <= 0) return LegDir.None;
             double body = Math.Abs(bar.Close - bar.Open);
-            if (body / range < BaseCandleBodyPct + 0.05) return LegDir.None;
+            if (body / range < LegStrengthPct + 0.05) return LegDir.None;
             if (bar.Close > bar.Open) return LegDir.Up;
             if (bar.Close < bar.Open) return LegDir.Down;
             return LegDir.None;
