@@ -42,7 +42,7 @@ namespace TradePhantoms
         public int ProfileDays = 1;
 
         // ── Bar-based fallback settings ─────────────────────────────────────────
-        [InputParameter("Fallback: lookback bars", 3, 50, 20000, 50, 0)]
+        [InputParameter("Fallback: lookback bars", 3, 1, 20000, 1, 0)]
         public int LookbackBars = 500;
 
         [InputParameter("Fallback: bucket size (ticks)", 4, 1, 20, 1, 0)]
