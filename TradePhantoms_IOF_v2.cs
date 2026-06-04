@@ -109,9 +109,12 @@ namespace TradePhantomsIOF
         public double MinImpulseRatio = 2.0;
 
         [InputParameter("Max base candles", 4, 1, 20, 1, 0)]
-        public int MaxBaseCandles = 7;
+        public int MaxBaseCandles = 15;
 
-        [InputParameter("Lookback bars to scan", 5, 50, 5000, 50, 0)]
+        [InputParameter("Cluster max range (ticks)", 5, 5, 500, 5, 0)]
+        public double ClusterMaxRangeTicks = 120;
+
+        [InputParameter("Lookback bars to scan", 6, 50, 5000, 50, 0)]
         public int LookbackBars = 500;
 
         [InputParameter("Show demand zones", 6)]
@@ -4525,7 +4528,9 @@ namespace TradePhantomsIOF
                     this.MTFLookbackBars,
                     this.BaseCandleMaxBodyPct,
                     this.MinImpulseRatio,
-                    this.MaxBaseCandles);
+                    this.MaxBaseCandles,
+                    this.Symbol.TickSize,
+                    this.ClusterMaxRangeTicks);
             }
             catch (Exception ex)
             {
@@ -4541,7 +4546,9 @@ namespace TradePhantomsIOF
                     this.MTFLookbackBars,
                     this.BaseCandleMaxBodyPct,
                     this.MinImpulseRatio,
-                    this.MaxBaseCandles);
+                    this.MaxBaseCandles,
+                    this.Symbol.TickSize,
+                    this.ClusterMaxRangeTicks);
             }
             catch (Exception ex)
             {
@@ -4809,7 +4816,9 @@ namespace TradePhantomsIOF
                 this.LookbackBars,
                 this.BaseCandleMaxBodyPct,
                 this.MinImpulseRatio,
-                this.MaxBaseCandles);
+                this.MaxBaseCandles,
+                this.Symbol.TickSize,
+                this.ClusterMaxRangeTicks);
 
             // IM7: compute MTFC bonus eligibility BEFORE the MinScore filter
             // so a chart-TF zone whose raw score lands a hair under MinScore

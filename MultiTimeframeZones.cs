@@ -118,7 +118,9 @@ namespace TradePhantomsIOF.MultiTF
             int lookbackBars,
             double baseCandleMaxBodyPct,
             double minImpulseRatio,
-            int maxBaseCandles)
+            int maxBaseCandles,
+            double tickSize = 0.25,
+            double clusterMaxRangeTicks = 120)
         {
             var result = new List<TimeframeZone>();
 
@@ -131,7 +133,9 @@ namespace TradePhantomsIOF.MultiTF
             // Sanity-clamp inputs.
             if (lookbackBars < 4) lookbackBars = 4;
             if (maxBaseCandles < 1) maxBaseCandles = 1;
-            if (maxBaseCandles > 7) maxBaseCandles = 7;
+            if (maxBaseCandles > 15) maxBaseCandles = 15;
+            if (tickSize <= 0) tickSize = 0.25;
+            if (clusterMaxRangeTicks <= 0) clusterMaxRangeTicks = 120;
             if (baseCandleMaxBodyPct <= 0) baseCandleMaxBodyPct = 0.5;
             if (minImpulseRatio <= 0) minImpulseRatio = 2.0;
 
@@ -148,9 +152,11 @@ namespace TradePhantomsIOF.MultiTF
                     if (startIndex < 1) continue;
                     if (endIndex + 1 >= total) continue;
 
-                    // Step 2a: every bar in the base must be a "base candle"
-                    // (body / range <= threshold).
-                    if (!IsValidBase(data, startIndex, endIndex, baseCandleMaxBodyPct))
+                    // Step 2a: the cluster's total high-to-low range must be
+                    // within clusterMaxRangeTicks. Individual candle shape is
+                    // irrelevant — noisy inside-bars are fine as long as the
+                    // whole consolidation stays tight.
+                    if (!IsValidBase(data, startIndex, endIndex, tickSize, clusterMaxRangeTicks))
                         continue;
 
                     // Step 2b: bar BEFORE the base is the leg-in directional
@@ -220,20 +226,24 @@ namespace TradePhantomsIOF.MultiTF
 
         private enum LegDir { None, Up, Down }
 
-        /// <summary>True if every bar in [start..end] is a valid base candle
-        /// (body / range &lt;= baseCandleMaxBodyPct).</summary>
-        private static bool IsValidBase(HistoricalData data, int start, int end, double baseCandleMaxBodyPct)
+        /// <summary>True if the cluster [start..end] qualifies as a base:
+        /// the total high-to-low span of all candles must be within
+        /// clusterMaxRangeTicks. Individual candle shape doesn't matter —
+        /// messy inside-bars and dojis are all valid as long as the cluster
+        /// stays tight.</summary>
+        private static bool IsValidBase(HistoricalData data, int start, int end, double tickSize, double clusterMaxRangeTicks)
         {
+            double clusterHigh = double.MinValue;
+            double clusterLow  = double.MaxValue;
             for (int i = start; i <= end; i++)
             {
                 var bar = data[i, SeekOriginHistory.Begin] as HistoryItemBar;
                 if (bar == null) return false;
-                double range = bar.High - bar.Low;
-                if (range <= 0) return false;
-                double body = Math.Abs(bar.Close - bar.Open);
-                if (body / range > baseCandleMaxBodyPct) return false;
+                if (bar.High > clusterHigh) clusterHigh = bar.High;
+                if (bar.Low  < clusterLow)  clusterLow  = bar.Low;
             }
-            return true;
+            if (clusterHigh == double.MinValue || clusterLow == double.MaxValue) return false;
+            return (clusterHigh - clusterLow) <= clusterMaxRangeTicks * tickSize;
         }
 
         /// <summary>Classify a candle as Up / Down / None per the v2 master rule:
@@ -837,18 +847,20 @@ namespace TradePhantomsIOF.MultiTF
             int lookbackBars,
             double baseCandleMaxBodyPct,
             double minImpulseRatio,
-            int maxBaseCandles)
+            int maxBaseCandles,
+            double tickSize = 0.25,
+            double clusterMaxRangeTicks = 120)
         {
             var all = new List<TimeframeZone>();
             if (ltfData != null)
                 all.AddRange(ScanTimeframe(ltfData, ZoneTimeframe.LTF, lookbackBars,
-                    baseCandleMaxBodyPct, minImpulseRatio, maxBaseCandles));
+                    baseCandleMaxBodyPct, minImpulseRatio, maxBaseCandles, tickSize, clusterMaxRangeTicks));
             if (itfData != null)
                 all.AddRange(ScanTimeframe(itfData, ZoneTimeframe.ITF, lookbackBars,
-                    baseCandleMaxBodyPct, minImpulseRatio, maxBaseCandles));
+                    baseCandleMaxBodyPct, minImpulseRatio, maxBaseCandles, tickSize, clusterMaxRangeTicks));
             if (htfData != null)
                 all.AddRange(ScanTimeframe(htfData, ZoneTimeframe.HTF, lookbackBars,
-                    baseCandleMaxBodyPct, minImpulseRatio, maxBaseCandles));
+                    baseCandleMaxBodyPct, minImpulseRatio, maxBaseCandles, tickSize, clusterMaxRangeTicks));
             return all;
         }
 
