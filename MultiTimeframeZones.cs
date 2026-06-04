@@ -152,10 +152,7 @@ namespace TradePhantomsIOF.MultiTF
                     if (startIndex < 1) continue;
                     if (endIndex + 1 >= total) continue;
 
-                    // Step 2a: the cluster's total high-to-low range must be
-                    // within clusterMaxRangeTicks. Individual candle shape is
-                    // irrelevant — noisy inside-bars are fine as long as the
-                    // whole consolidation stays tight.
+                    // Step 2a: cluster high-to-low must fit within clusterMaxRangeTicks.
                     if (!IsValidBase(data, startIndex, endIndex, tickSize, clusterMaxRangeTicks))
                         continue;
 
@@ -226,11 +223,8 @@ namespace TradePhantomsIOF.MultiTF
 
         private enum LegDir { None, Up, Down }
 
-        /// <summary>True if the cluster [start..end] qualifies as a base:
-        /// the total high-to-low span of all candles must be within
-        /// clusterMaxRangeTicks. Individual candle shape doesn't matter —
-        /// messy inside-bars and dojis are all valid as long as the cluster
-        /// stays tight.</summary>
+        /// <summary>True if the cluster [start..end] total high-to-low fits within
+        /// clusterMaxRangeTicks. Individual candle shape doesn't matter.</summary>
         private static bool IsValidBase(HistoricalData data, int start, int end, double tickSize, double clusterMaxRangeTicks)
         {
             double clusterHigh = double.MinValue;
