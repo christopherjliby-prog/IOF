@@ -26,6 +26,8 @@
     <Compile Remove="iof_agent/**" />
     <Compile Remove="VolumeSpike/**" />
     <Compile Remove="IOF_TradeJournal/**" />
+    <Compile Remove="IOF_PositionSizer/**" />
+    <Compile Remove="IOF_Clean/**" />
   </ItemGroup>
 
   <ItemGroup>

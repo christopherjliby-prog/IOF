@@ -5993,6 +5993,9 @@ namespace TradePhantomsIOF
                 }
 
                 Color baseColor = isDemand ? DemandColor : SupplyColor;
+                // MTFC-confirmed zones override to purple (keep user's alpha)
+                if (z.MtfcBonus > 0)
+                    baseColor = Color.FromArgb(baseColor.A, 160, 0, 230);
 
                 // Tradeable: score >= MinScore. Below = informational only
                 // (touched/degraded but not invalidated — visible so the
@@ -6320,10 +6323,10 @@ namespace TradePhantomsIOF
             var win = this.CurrentChart.MainWindow;
             int rightPx = win.ClientRectangle.Right;
 
-            // YELLOW dashed: LTF-in-ITF / LTF-in-HTF.
+            // PURPLE dashed: LTF-in-ITF / LTF-in-HTF (matches MTFC zone fill color).
             if (hasLtfOverlaps)
             {
-                using (var pen = new Pen(this.MTFCOverlapColor, 2.5f) { DashStyle = DashStyle.Dash })
+                using (var pen = new Pen(Color.FromArgb(220, 160, 0, 230), 2.5f) { DashStyle = DashStyle.Dash })
                 {
                     for (int i = 0; i < this.mtfcOverlaps.Count; i++)
                     {
