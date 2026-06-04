@@ -28,6 +28,7 @@
     <Compile Remove="IOF_TradeJournal/**" />
     <Compile Remove="IOF_PositionSizer/**" />
     <Compile Remove="IOF_Clean/**" />
+    <Compile Remove="FiveMinMoneyMaker/**" />
   </ItemGroup>
 
   <ItemGroup>
