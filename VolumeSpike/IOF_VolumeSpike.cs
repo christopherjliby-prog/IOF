@@ -38,11 +38,11 @@ namespace TradePhantoms
         public int SurroundingN = 5;
 
         // ── Native VP settings ──────────────────────────────────────────────────
-        [InputParameter("Profile days (native VP)", 2, 1, 10, 1, 0)]
+        [InputParameter("Profile days (native VP)", 2, 1, 60, 1, 0)]
         public int ProfileDays = 1;
 
         // ── Bar-based fallback settings ─────────────────────────────────────────
-        [InputParameter("Fallback: lookback bars", 3, 50, 5000, 50, 0)]
+        [InputParameter("Fallback: lookback bars", 3, 50, 20000, 50, 0)]
         public int LookbackBars = 500;
 
         [InputParameter("Fallback: bucket size (ticks)", 4, 1, 20, 1, 0)]
