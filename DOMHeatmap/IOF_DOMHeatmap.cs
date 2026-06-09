@@ -98,7 +98,15 @@ namespace TradePhantoms
 
         // ── IVolumeAnalysisIndicator ──────────────────────────────────────────────
         public bool IsRequirePriceLevelsCalculation => true;
-        public void VolumeAnalysisData_Loaded() { _vaLoaded = true; }
+        public void VolumeAnalysisData_Loaded()
+        {
+            _vaLoaded = true;
+            if (!UseVpFallback) return;
+            // Backfill all available historical bars now that VA data is ready
+            int n = Math.Min(Count, MaxHistory);
+            for (int i = n - 1; i >= 0; i--)
+                CaptureFromVolumeProfile(i);
+        }
 
         // ── Snapshot types ────────────────────────────────────────────────────────
         private class DomLevel
@@ -137,7 +145,7 @@ namespace TradePhantoms
         {
             if (UseVpFallback)
             {
-                CaptureFromVolumeProfile();
+                CaptureFromVolumeProfile(0); // index 0 = current bar
                 return;
             }
             CaptureDOM();
@@ -147,7 +155,8 @@ namespace TradePhantoms
 
         // Scans Symbol via reflection to find the first property that looks like
         // a DOM/depth object with Bids and Asks collections. Caches result so it
-        // only runs once per indicator load.
+        // only runs once per indicator load. Writes full debug log to
+        // %APPDATA%\Quantower\iof_dom_debug.txt for inspection.
         private bool DiscoverDomProperty()
         {
             if (_discoveredProp != null) return true;
@@ -157,23 +166,27 @@ namespace TradePhantoms
             {
                 var symbolType = Symbol.GetType();
                 var allProps   = symbolType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+                var allMethods = symbolType.GetMethods(BindingFlags.Public | BindingFlags.Instance);
 
                 // Candidate DOM property names (ordered by likelihood)
                 var domCandidates = new[]
                 {
                     "DepthOfMarket", "DOMItems", "OrderBook", "Level2",
-                    "DOM", "Depth", "MarketDepth", "BookDepth", "L2"
+                    "DOM", "Depth", "MarketDepth", "BookDepth", "L2",
+                    "Ladder", "BookData", "PriceDepth", "QuoteDepth"
                 };
 
-                // First pass: try known names
+                // First pass: try known names (including null-valued — log but keep going)
                 foreach (var name in domCandidates)
                 {
                     var prop = symbolType.GetProperty(name,
                         BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
                     if (prop == null) continue;
 
-                    var val = prop.GetValue(Symbol);
-                    if (val == null) continue;
+                    object val = null;
+                    try { val = prop.GetValue(Symbol); } catch { }
+
+                    if (val == null) continue; // exists but null — subscription likely needed
 
                     var (bids, asks) = FindBidsAsks(val);
                     if (bids != null && asks != null)
@@ -182,11 +195,12 @@ namespace TradePhantoms
                         _discoveredBids = bids;
                         _discoveredAsks = asks;
                         _statusMsg = $"DOM discovered: Symbol.{_discoveredProp} (bids={_discoveredBids}, asks={_discoveredAsks})";
+                        WriteDomDebug($"SUCCESS: {_statusMsg}");
                         return true;
                     }
                 }
 
-                // Second pass: scan all properties
+                // Second pass: scan all properties (non-null only — if null at runtime, DOM needs subscription)
                 foreach (var prop in allProps)
                 {
                     try
@@ -200,15 +214,46 @@ namespace TradePhantoms
                             _discoveredBids = bids;
                             _discoveredAsks = asks;
                             _statusMsg = $"DOM discovered: Symbol.{_discoveredProp} (bids={_discoveredBids}, asks={_discoveredAsks})";
+                            WriteDomDebug($"SUCCESS (scan): {_statusMsg}");
                             return true;
                         }
                     }
                     catch { }
                 }
 
-                // Log all property names so user can report back
-                var names = string.Join(", ", allProps.Select(p => p.Name));
-                _statusMsg = $"DOM not found. Symbol properties: {names}";
+                // Build full debug dump and write to file
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"=== IOF DOM Debug === {DateTime.Now}");
+                sb.AppendLine($"Symbol type: {symbolType.FullName}");
+                sb.AppendLine();
+                sb.AppendLine("--- PROPERTIES (name | type | value) ---");
+                foreach (var p in allProps.OrderBy(p => p.Name))
+                {
+                    string valStr;
+                    try
+                    {
+                        var v = p.GetValue(Symbol);
+                        valStr = v == null ? "<null>" : $"{v.GetType().Name}: {v}";
+                    }
+                    catch (Exception ex) { valStr = $"<error: {ex.Message}>"; }
+                    sb.AppendLine($"  {p.Name,-40} {p.PropertyType.Name,-30} = {valStr}");
+                }
+                sb.AppendLine();
+                sb.AppendLine("--- METHODS (name | params) ---");
+                foreach (var m in allMethods.OrderBy(m => m.Name)
+                    .Where(m => !m.IsSpecialName && m.Name != "Equals" && m.Name != "GetHashCode"
+                                && m.Name != "ToString" && m.Name != "GetType"))
+                {
+                    var parms = string.Join(", ", m.GetParameters().Select(p => $"{p.ParameterType.Name} {p.Name}"));
+                    sb.AppendLine($"  {m.Name,-40} ({parms})");
+                }
+
+                var debugPath = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Quantower", "iof_dom_debug.txt");
+                System.IO.File.WriteAllText(debugPath, sb.ToString());
+
+                _statusMsg = $"DOM not found — debug log: {debugPath}";
                 return false;
             }
             catch (Exception ex)
@@ -216,6 +261,18 @@ namespace TradePhantoms
                 _statusMsg = $"Discovery error: {ex.Message}";
                 return false;
             }
+        }
+
+        private void WriteDomDebug(string msg)
+        {
+            try
+            {
+                var debugPath = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "Quantower", "iof_dom_debug.txt");
+                System.IO.File.WriteAllText(debugPath, $"{DateTime.Now}: {msg}\n");
+            }
+            catch { }
         }
 
         // Looks for Bids/Asks collection properties on a candidate DOM object.
@@ -369,11 +426,11 @@ namespace TradePhantoms
             }
         }
 
-        private void CaptureFromVolumeProfile()
+        private void CaptureFromVolumeProfile(int barIndex = 0)
         {
             try
             {
-                var bar = HistoricalData[0, SeekOriginHistory.Begin] as HistoryItemBar;
+                var bar = HistoricalData[barIndex] as HistoryItemBar;
                 if (bar?.VolumeAnalysisData?.PriceLevels == null || bar.VolumeAnalysisData.PriceLevels.Count == 0)
                     return;
 
@@ -450,7 +507,27 @@ namespace TradePhantoms
                 int x1       = (int)win.CoordinatesConverter.GetChartX(snapshots[^2].Time);
                 int barWidth = Math.Max(1, Math.Abs(x0 - x1));
 
-                double volScale = ManualVolumeScale > 0 ? ManualVolumeScale : _maxVolSeen;
+                // Use 95th-percentile volume as scale ceiling so gradient spreads
+                // across the real data range rather than collapsing to dark-blue.
+                double volScale;
+                if (ManualVolumeScale > 0)
+                {
+                    volScale = ManualVolumeScale;
+                }
+                else
+                {
+                    var allVols = snapshots
+                        .SelectMany(s => s.Levels)
+                        .Select(l => l.Total)
+                        .OrderBy(v => v)
+                        .ToList();
+                    if (allVols.Count > 0)
+                    {
+                        int p95idx = (int)(allVols.Count * 0.95);
+                        volScale = allVols[Math.Min(p95idx, allVols.Count - 1)];
+                    }
+                    else volScale = _maxVolSeen;
+                }
                 if (volScale < 1) volScale = 1;
 
                 foreach (var snap in snapshots)
