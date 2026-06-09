@@ -41,7 +41,7 @@ namespace TradePhantoms
         // ── Inputs: Signal Thresholds ─────────────────────────────────────────────
 
         [InputParameter("Min score to display (0-100)", 0, 0, 100, 5, 0)]
-        public int MinDisplayScore = 35;
+        public int MinDisplayScore = 20;
 
         [InputParameter("Min score to alert", 1, 0, 100, 5, 0)]
         public int MinAlertScore = 65;
@@ -314,18 +314,20 @@ namespace TradePhantoms
 
             double atr = GetAtr();
 
-            // Departure (0-10): how far did price move away from zone after forming
+            // Departure (0-10): measure bars JUST AFTER zone formation
+            // (lower index = more recent; bars at barIndex-1 to barIndex-6 are the
+            //  bars that formed AFTER the pivot, showing how far price moved away)
             double departure = 0;
-            for (int j = 0; j < Math.Min(barIndex, 5); j++)
+            for (int j = 1; j <= Math.Min(6, barIndex - 1); j++)
             {
-                var b = HistoricalData[j] as HistoryItemBar;
+                var b = HistoricalData[barIndex - j] as HistoryItemBar;
                 if (b == null) break;
                 double dist = isDemand
                     ? b.Close - pivot.Low
                     : pivot.High - b.Close;
                 if (dist > departure) departure = dist;
             }
-            double depScore = atr > 0 ? Math.Min(10.0, departure / atr * 5.0) : 5.0;
+            double depScore = atr > 0 ? Math.Min(10.0, departure / atr * 4.0) : 5.0;
 
             // Tightness (0-6): narrow body relative to range = clean base
             double range    = pivot.High - pivot.Low;
@@ -669,15 +671,31 @@ namespace TradePhantoms
         {
             base.OnPaintChart(args);
 
+            var gr  = args.Graphics;
+            var win = CurrentChart.MainWindow;
+
+            // Status overlay — always visible so you can see the engine is running
+            try
+            {
+                int    zoneCount = 0;
+                lock (_zoneLock) zoneCount = _localZones.Count;
+                int    sigCount  = 0;
+                lock (_sigLock)  sigCount  = _signals.Count;
+
+                using var sf = new Font("Consolas", 8f, FontStyle.Bold);
+                string status = $"IOF SE | Zones: {zoneCount} | Signals: {sigCount} | Min: {MinDisplayScore} | VA: {(_vaLoaded ? "ON" : "OFF")}";
+                gr.DrawString(status, sf, Brushes.Cyan, 6f, 22f);
+            }
+            catch { }
+
             List<SeSignal> snapshot;
             lock (_sigLock) snapshot = new List<SeSignal>(_signals);
             if (snapshot.Count == 0) return;
 
-            var gr  = args.Graphics;
-            var win = CurrentChart.MainWindow;
-
             using var labelFont = new Font("Consolas", 8f, FontStyle.Bold);
             using var detFont   = new Font("Consolas", 7f, FontStyle.Regular);
+
+            var clientRect = (System.Drawing.Rectangle)win.ClientRectangle;
 
             foreach (var sig in snapshot)
             {
@@ -685,7 +703,7 @@ namespace TradePhantoms
                 {
                     int x = (int)Math.Round((double)win.CoordinatesConverter.GetChartX(sig.BarTime));
                     int y = (int)Math.Round((double)win.CoordinatesConverter.GetChartY(sig.Price));
-                    if (x < 0 || x > args.Rectangle.Width + 200) continue;
+                    if (x < clientRect.Left - 20 || x > clientRect.Right + 20) continue;
 
                     Color c = sig.Grade switch
                     {
