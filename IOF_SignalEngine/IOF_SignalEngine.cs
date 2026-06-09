@@ -2,46 +2,29 @@
 // IOF_SignalEngine.cs — Ultimate Order Flow Confluence Signal Indicator
 // =============================================================================
 // Platform : Quantower C# SDK (net8.0, TradingPlatform.BusinessLayer v1.145.x)
-// Drop path: C:\Quantower\Settings\Scripts\Indicators\IOF
+// Drop path: C:\Quantower\Settings\Scripts\Indicators\IOF_SignalEngine\
 //
-// Reads IOFZoneRegistry (populated by TradePhantoms_IOF_v2) and synthesizes
-// all six order-flow confluence dimensions into a single scored signal at
-// every zone-touch event. No zone = no signal. Order flow is confirmation at
-// a level, not a standalone signal.
+// STANDALONE — no dependency on TradePhantoms_IOF_v2 or IOFZoneRegistry.
+// Detects its own supply/demand zones from price action (pivot swing method)
+// and fires confluence-scored signals on zone-touch events.
 //
 // SCORE COMPONENTS (100 pts):
-//   ZoneQ   (0-25) Zone rubric score (/21 scaled). First-test freshness
-//                  modifier applied on top (×1.0 / ×0.75 / ×0.4).
-//   DeltaQ  (0-20) Current-bar delta direction (10) + multi-bar CVD slope (10).
-//   AbsQ    (0-20) Absorption: heavy |delta| opposing zone + price stalling.
-//                  Full signal=20, partial=10, range-only=6.
+//   ZoneQ   (0-25) Zone rubric: departure strength, base tightness, approach.
+//   DeltaQ  (0-20) Current-bar delta (10) + multi-bar CVD slope (10).
+//   AbsQ    (0-20) Absorption: heavy opposing delta + price stalling.
 //   DayQ    (0-15) IB acceptance direction (8) + session CVD alignment (7).
-//   MetQ    (0-10) ZoneMetricsRegistry: MTFC overlap (5) + HVN confluence (5).
-//   FreshQ  (0-10) Touch-count freshness: 0 touches=10, 1=5, 2+=0.
+//   FreshQ  (0-20) Touch freshness: first=20, second=10, third+=0.
 //
-// GRADES: A+(≥80) A(65-79) B(50-64) C(35-49). Events below MinDisplayScore hidden.
+// GRADES: A+(≥80)  A(65-79)  B(50-64)  C(35-49). Below MinDisplayScore hidden.
 //
-// PHASE 2: Enable CSV log → every zone-touch event written to disk for
-//          Python post-processor statistical discovery.
-//
-// REQUIRES: TradePhantoms_IOF_v2 loaded on the same chart (populates
-//           IOFZoneRegistry + ZoneMetricsRegistry). Works without it —
-//           ZoneQ and MetQ components return 0 and no signals fire.
+// PHASE 2: Enable CSV log → every signal written to disk for
+//          Python post-processor (phase2_analyze.py) statistical discovery.
 //
 // -----------------------------------------------------------------------------
 // PATCH NOTES
 // -----------------------------------------------------------------------------
-// 2026-06-09: Initial build.
-//   - Six-component confluence scorer wired end-to-end
-//   - IVolumeAnalysisIndicator for real delta access (not tick-rule synthetic)
-//   - Initial Balance tracker: session-aware, period-aware bar count
-//   - Absorption detector: mirrors ComputeAbsorptionFlag from IOF v2
-//   - Zone touch de-duplication: transition-gated (outside→inside fires once)
-//   - Touch count tracked per zone ID — freshness degrades over retests
-//   - Colored diamond markers (demand=upward, supply=downward) + grade label
-//   - Optional breakdown line: Z/D/A/S/M/F component scores
-//   - Core.Instance.Loggers alert on events >= MinAlertScore
-//   - Phase 2 CSV: one row per signal, all components + bar context
+// 2026-06-09: v1 — IOFZoneRegistry-based (required IOF v2 on same chart)
+// 2026-06-09: v2 — Standalone. Built-in pivot zone scanner, no external deps.
 // =============================================================================
 
 using System;
@@ -65,6 +48,17 @@ namespace TradePhantoms
 
         [InputParameter("Zone proximity (ticks)", 2, 1, 50, 1, 0)]
         public int ProximityTicks = 6;
+
+        // ── Inputs: Zone Detection ────────────────────────────────────────────────
+
+        [InputParameter("Zone lookback (bars)", 3, 20, 500, 10, 0)]
+        public int ZoneLookback = 150;
+
+        [InputParameter("Zone pivot strength (bars each side)", 4, 1, 10, 1, 0)]
+        public int ZoneStrength = 3;
+
+        [InputParameter("Zone rescan interval (bars)", 5, 1, 50, 1, 0)]
+        public int ZoneRescanInterval = 5;
 
         // ── Inputs: Session / IB ─────────────────────────────────────────────────
 
@@ -99,7 +93,7 @@ namespace TradePhantoms
         [InputParameter("Show grade label", 30)]
         public bool ShowLabels = true;
 
-        [InputParameter("Show component breakdown (Z/D/A/S/M/F)", 31)]
+        [InputParameter("Show component breakdown (Z/D/A/S/F)", 31)]
         public bool ShowBreakdown = false;
 
         [InputParameter("Marker size", 32, 4, 24, 1, 0)]
@@ -134,11 +128,27 @@ namespace TradePhantoms
             _vaLoaded = true;
         }
 
+        // ── Internal zone type ────────────────────────────────────────────────────
+
+        private sealed class LocalZone
+        {
+            public double Top;
+            public double Bottom;
+            public bool   IsDemand;   // true = demand (support), false = supply (resistance)
+            public double Score;      // 0-21, maps to ZoneQ via score/21*25
+            public int    TouchCount;
+
+            public string Key => $"{(IsDemand ? "D" : "S")}_{Top:F4}_{Bottom:F4}";
+        }
+
         // ── Private state ─────────────────────────────────────────────────────────
 
-        private string _regKey   = "";
         private double _tickSize = 0.25;
         private bool   _vaLoaded = false;
+        private int    _barsSinceZoneScan = 0;
+
+        private List<LocalZone> _localZones = new();
+        private readonly object _zoneLock   = new();
 
         // Transition-gate: zoneKey → was inside proximity last closed bar
         private readonly Dictionary<string, bool> _prevInProx  = new(StringComparer.Ordinal);
@@ -165,7 +175,7 @@ namespace TradePhantoms
         public IOF_SignalEngine() : base()
         {
             Name           = "IOF_SignalEngine";
-            Description    = "IOF zone-touch confluence scorer — six-component order flow signal engine";
+            Description    = "IOF standalone confluence signal engine — built-in zone detection + six-component scorer";
             SeparateWindow = false;
         }
 
@@ -173,32 +183,39 @@ namespace TradePhantoms
 
         protected override void OnInit()
         {
-            _regKey   = BuildRegKey();
             _tickSize = Symbol?.TickSize > 0 ? Symbol.TickSize : 0.25;
 
             _prevInProx.Clear();
             _touchCounts.Clear();
             ResetSession();
 
-            lock (_sigLock) _signals.Clear();
+            lock (_sigLock)  _signals.Clear();
+            lock (_zoneLock) _localZones.Clear();
+
+            _barsSinceZoneScan = 0;
         }
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            if (Count < 3) return;
+            if (Count < ZoneStrength * 2 + 3) return;
 
-            // Update IB on every tick using the current bar
             var currentBar = HistoricalData[0] as HistoryItemBar;
             if (currentBar == null) return;
 
             UpdateIB(currentBar);
 
-            // Zone touches only on closed bars
             if (args.Reason != UpdateReason.NewBar && args.Reason != UpdateReason.HistoricalBar)
                 return;
 
-            // On the very first historical bar, initialize proximity state without firing
-            if (Count == 3)
+            // Rescan zones periodically
+            _barsSinceZoneScan++;
+            if (_barsSinceZoneScan >= ZoneRescanInterval || _localZones.Count == 0)
+            {
+                ScanLocalZones();
+                _barsSinceZoneScan = 0;
+            }
+
+            if (Count == ZoneStrength * 2 + 3)
             {
                 SeedProximity(currentBar);
                 return;
@@ -210,32 +227,141 @@ namespace TradePhantoms
         protected override void OnClear()
         {
             CloseCsv();
-            lock (_sigLock) _signals.Clear();
+            lock (_sigLock)  _signals.Clear();
+            lock (_zoneLock) _localZones.Clear();
             _prevInProx.Clear();
             _touchCounts.Clear();
+        }
+
+        // ── Zone Scanner (pivot swing method) ────────────────────────────────────
+
+        private void ScanLocalZones()
+        {
+            if (Count < ZoneStrength * 2 + 3) return;
+
+            var zones = new List<LocalZone>();
+            int limit = Math.Min(ZoneLookback, Count - ZoneStrength - 2);
+
+            for (int i = ZoneStrength; i < limit; i++)
+            {
+                var bar = HistoricalData[i] as HistoryItemBar;
+                if (bar == null) continue;
+
+                // ── Pivot High → supply zone ──────────────────────────────────
+                bool isPivotHigh = true;
+                for (int j = 1; j <= ZoneStrength && isPivotHigh; j++)
+                {
+                    var l = HistoricalData[i + j] as HistoryItemBar;
+                    var r = HistoricalData[i - j] as HistoryItemBar;
+                    if (l == null || r == null || l.High >= bar.High || r.High >= bar.High)
+                        isPivotHigh = false;
+                }
+                if (isPivotHigh)
+                {
+                    double top    = bar.High;
+                    double bottom = Math.Max(bar.Open, bar.Close);
+                    if (top > bottom + _tickSize)
+                        zones.Add(new LocalZone
+                        {
+                            Top      = top,
+                            Bottom   = bottom,
+                            IsDemand = false,
+                            Score    = ComputeZoneScore(i, isDemand: false),
+                        });
+                }
+
+                // ── Pivot Low → demand zone ───────────────────────────────────
+                bool isPivotLow = true;
+                for (int j = 1; j <= ZoneStrength && isPivotLow; j++)
+                {
+                    var l = HistoricalData[i + j] as HistoryItemBar;
+                    var r = HistoricalData[i - j] as HistoryItemBar;
+                    if (l == null || r == null || l.Low <= bar.Low || r.Low <= bar.Low)
+                        isPivotLow = false;
+                }
+                if (isPivotLow)
+                {
+                    double bottom = bar.Low;
+                    double top    = Math.Min(bar.Open, bar.Close);
+                    if (top > bottom + _tickSize)
+                        zones.Add(new LocalZone
+                        {
+                            Top      = top,
+                            Bottom   = bottom,
+                            IsDemand = true,
+                            Score    = ComputeZoneScore(i, isDemand: true),
+                        });
+                }
+            }
+
+            // Preserve touch counts for zones that survived the rescan
+            lock (_zoneLock)
+            {
+                foreach (var z in zones)
+                {
+                    _touchCounts.TryGetValue(z.Key, out int tc);
+                    z.TouchCount = tc;
+                }
+                _localZones = zones;
+            }
+        }
+
+        // Zone quality score 0-21 used by ZoneQ formula (score/21*25)
+        private double ComputeZoneScore(int barIndex, bool isDemand)
+        {
+            var pivot = HistoricalData[barIndex] as HistoryItemBar;
+            if (pivot == null) return 10.0;
+
+            double atr = GetAtr();
+
+            // Departure (0-10): how far did price move away from zone after forming
+            double departure = 0;
+            for (int j = 0; j < Math.Min(barIndex, 5); j++)
+            {
+                var b = HistoricalData[j] as HistoryItemBar;
+                if (b == null) break;
+                double dist = isDemand
+                    ? b.Close - pivot.Low
+                    : pivot.High - b.Close;
+                if (dist > departure) departure = dist;
+            }
+            double depScore = atr > 0 ? Math.Min(10.0, departure / atr * 5.0) : 5.0;
+
+            // Tightness (0-6): narrow body relative to range = clean base
+            double range    = pivot.High - pivot.Low;
+            double bodySize = Math.Abs(pivot.Close - pivot.Open);
+            double tightScore = range > 0 ? (1.0 - bodySize / range) * 6.0 : 3.0;
+
+            // Approach momentum (0-5): strong move INTO the zone = meaningful level
+            var prev = HistoricalData[barIndex + 1] as HistoryItemBar;
+            double momScore = 0;
+            if (prev != null)
+            {
+                bool movingIn = isDemand
+                    ? prev.Close < prev.Open
+                    : prev.Close > prev.Open;
+                double prevBody = Math.Abs(prev.Close - prev.Open);
+                momScore = movingIn ? (atr > 0 ? Math.Min(5.0, prevBody / atr * 3.0) : 3.0) : 1.0;
+            }
+
+            return Math.Max(1.0, Math.Min(21.0, depScore + tightScore + momScore));
         }
 
         // ── Zone Touch Engine ─────────────────────────────────────────────────────
 
         private void EvaluateZoneTouches(HistoryItemBar bar)
         {
-            var zones = IOFZoneRegistry.GetZones(_regKey);
-            if (zones == null || zones.Count == 0)
-            {
-                foreach (var k in _prevInProx.Keys.ToList())
-                    _prevInProx[k] = false;
-                return;
-            }
+            List<LocalZone> zones;
+            lock (_zoneLock) zones = new List<LocalZone>(_localZones);
+
+            if (zones.Count == 0) return;
 
             double price = bar.Close;
             double prox  = ProximityTicks * _tickSize;
 
             foreach (var zone in zones)
             {
-                if (!zone.IsTradeable) continue;
-
-                string zid      = ZoneKey(zone);
-                bool   isDemand = zone.Type == ZoneType.RBR || zone.Type == ZoneType.DBR;
+                string zid = zone.Key;
 
                 bool inProx = price >= zone.Bottom - prox && price <= zone.Top + prox;
 
@@ -244,31 +370,31 @@ namespace TradePhantoms
 
                 if (!inProx || wasInProx) continue;
 
-                // Transition: outside → inside. Fire touch event.
+                // Transition: outside → inside proximity. Fire touch event.
                 _touchCounts.TryGetValue(zid, out int prevTouches);
                 _touchCounts[zid] = prevTouches + 1;
 
-                var result = Score(bar, zone, isDemand, prevTouches);
+                var result = Score(bar, zone, prevTouches);
                 if (result.Total < MinDisplayScore) continue;
 
-                double sigPrice = isDemand ? zone.Bottom : zone.Top;
+                double sigPrice = zone.IsDemand ? zone.Bottom : zone.Top;
 
                 var sig = new SeSignal
                 {
-                    BarOffset = 0,
-                    BarTime   = bar.TimeLeft,
-                    Price     = sigPrice,
-                    IsDemand  = isDemand,
-                    ZoneId    = zid,
-                    Total     = result.Total,
-                    Grade     = result.Grade,
-                    ZoneQ     = result.ZoneQ,
-                    DeltaQ    = result.DeltaQ,
-                    AbsQ      = result.AbsQ,
-                    DayQ      = result.DayQ,
-                    MetQ      = result.MetQ,
-                    FreshQ    = result.FreshQ,
-                    TouchNum  = prevTouches + 1,
+                    BarOffset  = 0,
+                    BarTime    = bar.TimeLeft,
+                    Price      = sigPrice,
+                    IsDemand   = zone.IsDemand,
+                    ZoneId     = zid,
+                    Total      = result.Total,
+                    Grade      = result.Grade,
+                    ZoneQ      = result.ZoneQ,
+                    DeltaQ     = result.DeltaQ,
+                    AbsQ       = result.AbsQ,
+                    DayQ       = result.DayQ,
+                    FreshQ     = result.FreshQ,
+                    TouchNum   = prevTouches + 1,
+                    ZoneScoreRaw = zone.Score,
                 };
 
                 lock (_sigLock) _signals.Add(sig);
@@ -283,39 +409,36 @@ namespace TradePhantoms
 
         private void SeedProximity(HistoryItemBar bar)
         {
-            var zones = IOFZoneRegistry.GetZones(_regKey);
-            if (zones == null) return;
+            List<LocalZone> zones;
+            lock (_zoneLock) zones = new List<LocalZone>(_localZones);
+
             double price = bar.Close;
             double prox  = ProximityTicks * _tickSize;
             foreach (var zone in zones)
-                _prevInProx[ZoneKey(zone)] = price >= zone.Bottom - prox && price <= zone.Top + prox;
+                _prevInProx[zone.Key] = price >= zone.Bottom - prox && price <= zone.Top + prox;
         }
 
         // ── Six-Component Scorer ──────────────────────────────────────────────────
 
-        private ScoreResult Score(HistoryItemBar bar, ZoneSnapshot zone, bool isDemand, int prevTouches)
+        private ScoreResult Score(HistoryItemBar bar, LocalZone zone, int prevTouches)
         {
-            // 1 — Zone quality (0-25): rubric score /21 scaled, freshness-weighted
-            double rawZoneQ = zone.Score / 21.0 * 25.0;
+            // 1 — Zone quality (0-25): rubric score /21 scaled
             double fresh = prevTouches == 0 ? 1.0 : prevTouches == 1 ? 0.75 : 0.40;
-            int zoneQ = Clamp((int)Math.Round(rawZoneQ * fresh), 0, 25);
+            int zoneQ = Clamp((int)Math.Round(zone.Score / 21.0 * 25.0 * fresh), 0, 25);
 
             // 2 — Delta alignment (0-20)
-            int deltaQ = ScoreDelta(bar, isDemand);
+            int deltaQ = ScoreDelta(bar, zone.IsDemand);
 
             // 3 — Absorption (0-20)
-            int absQ = ScoreAbsorption(bar, isDemand);
+            int absQ = ScoreAbsorption(bar, zone.IsDemand);
 
             // 4 — Day structure / IB + session CVD (0-15)
-            int dayQ = ScoreDay(bar, isDemand);
+            int dayQ = ScoreDay(bar, zone.IsDemand);
 
-            // 5 — Zone metrics: MTFC + HVN (0-10)
-            int metQ = ScoreMetrics(zone);
+            // 5 — Freshness (0-20): standalone engine uses wider freshness range
+            int freshQ = prevTouches == 0 ? 20 : prevTouches == 1 ? 10 : 0;
 
-            // 6 — Freshness bonus (0-10)
-            int freshQ = prevTouches == 0 ? 10 : prevTouches == 1 ? 5 : 0;
-
-            int total = zoneQ + deltaQ + absQ + dayQ + metQ + freshQ;
+            int total = zoneQ + deltaQ + absQ + dayQ + freshQ;
 
             string grade = total >= 80 ? "A+"
                          : total >= 65 ? "A"
@@ -323,7 +446,7 @@ namespace TradePhantoms
                          : total >= 35 ? "C"
                          : "X";
 
-            return new ScoreResult(total, grade, zoneQ, deltaQ, absQ, dayQ, metQ, freshQ);
+            return new ScoreResult(total, grade, zoneQ, deltaQ, absQ, dayQ, freshQ);
         }
 
         // Delta alignment: current-bar delta (10) + rolling CVD slope (10) = max 20
@@ -339,7 +462,6 @@ namespace TradePhantoms
                 if (aligned) score += 10;
             }
 
-            // CVD slope = sum of last CvdLookback closed bars' delta
             double cvd = 0;
             int n = Math.Min(CvdLookback, Count - 1);
             for (int i = 1; i <= n; i++)
@@ -358,7 +480,6 @@ namespace TradePhantoms
         }
 
         // Absorption: heavy opposing delta + price stalling = max 20
-        // Pattern mirrors ComputeAbsorptionFlag in TradePhantoms_IOF_v2.cs
         private int ScoreAbsorption(HistoryItemBar bar, bool isDemand)
         {
             if (!_vaLoaded) return 0;
@@ -366,29 +487,23 @@ namespace TradePhantoms
             double barDelta = GetBarDelta(bar);
             if (barDelta == 0) return 0;
 
-            // For demand zones: expect SELLING delta (negative) that fails to push price down
-            // For supply zones: expect BUYING delta (positive) that fails to push price up
             bool opposingDelta = isDemand ? barDelta < 0 : barDelta > 0;
             if (!opposingDelta) return 0;
 
-            // The close should not have gone in the delta's direction → absorption confirmed
             bool priceHeld = isDemand
-                ? bar.Close >= bar.Open   // selling delta but price held up
-                : bar.Close <= bar.Open;  // buying delta but price held down
+                ? bar.Close >= bar.Open
+                : bar.Close <= bar.Open;
 
-            // Compute ATR
             double atr = GetAtr();
             bool rangeStalled = atr > 0 && (bar.High - bar.Low) < AbsRangeStall * atr;
 
-            // Compute avg |delta| over AvgDeltaPeriod
             double sumAbsDelta = 0;
             int cnt = 0;
             for (int i = 1; i <= Math.Min(AvgDeltaPeriod, Count - 1); i++)
             {
                 var b = HistoricalData[i] as HistoryItemBar;
                 if (b == null) continue;
-                double d = GetBarDelta(b);
-                sumAbsDelta += Math.Abs(d);
+                sumAbsDelta += Math.Abs(GetBarDelta(b));
                 cnt++;
             }
             double avgAbsDelta = cnt > 0 ? sumAbsDelta / cnt : 0;
@@ -408,19 +523,14 @@ namespace TradePhantoms
 
             if (_ibFormed && !double.IsNaN(_ibHigh) && !double.IsNaN(_ibLow))
             {
-                // IB accepted higher = price closed above IB high = bullish bias → favor demand
-                // IB accepted lower  = price closed below IB low  = bearish bias → favor supply
                 if (isDemand  && bar.Close > _ibHigh) score += 8;
                 if (!isDemand && bar.Close < _ibLow)  score += 8;
-                // Inside IB = balanced: no penalty, no bonus
             }
             else if (!_ibFormed)
             {
-                // IB still forming — if price is above session open midpoint favor demand, below favor supply
-                score += 4; // neutral partial credit while IB forms
+                score += 4;
             }
 
-            // Session CVD: sum all bars from the start of the current session window
             if (_vaLoaded)
             {
                 double sessionCvd = 0;
@@ -436,17 +546,6 @@ namespace TradePhantoms
             }
 
             return Clamp(score, 0, 15);
-        }
-
-        // MTFC (5) + HVN (5) from ZoneMetricsRegistry = max 10
-        private int ScoreMetrics(ZoneSnapshot zone)
-        {
-            if (!ZoneMetricsRegistry.TryGet(_regKey, zone.Top, zone.Bottom, out var met))
-                return 0;
-            int score = 0;
-            if (met.MtfcBonus > 0) score += 5;
-            if (met.HvnConfluence)  score += 5;
-            return score;
         }
 
         // ── Initial Balance Tracker ───────────────────────────────────────────────
@@ -493,7 +592,6 @@ namespace TradePhantoms
             try
             {
                 string agg = HistoricalData?.Aggregation?.ToString() ?? "";
-                // Expect strings like "1 Min", "5 Min", "15 Min", "1 Hour", etc.
                 if (agg.IndexOf("Min", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     var parts = agg.Split(' ');
@@ -508,10 +606,10 @@ namespace TradePhantoms
                 }
             }
             catch { }
-            return 4; // safe fallback
+            return 4;
         }
 
-        // ── Helper: Bar Delta (real VA or zero if not loaded) ─────────────────────
+        // ── Helpers ───────────────────────────────────────────────────────────────
 
         private static double GetBarDelta(HistoryItemBar bar)
         {
@@ -523,8 +621,6 @@ namespace TradePhantoms
             catch { }
             return 0;
         }
-
-        // ── Helper: ATR (true range, SMA over AtrPeriod) ─────────────────────────
 
         private double GetAtr()
         {
@@ -546,8 +642,6 @@ namespace TradePhantoms
             }
             return cnt > 0 ? sum / cnt : 0;
         }
-
-        // ── Helper: Eastern Time ──────────────────────────────────────────────────
 
         private static DateTime ToEasternTime(DateTime utc)
         {
@@ -614,7 +708,7 @@ namespace TradePhantoms
                         if (ShowBreakdown)
                         {
                             using var db = new SolidBrush(Color.FromArgb(170, c));
-                            string det = $"Z{sig.ZoneQ} D{sig.DeltaQ} A{sig.AbsQ} S{sig.DayQ} M{sig.MetQ} F{sig.FreshQ}";
+                            string det = $"Z{sig.ZoneQ} D{sig.DeltaQ} A{sig.AbsQ} S{sig.DayQ} F{sig.FreshQ}";
                             gr.DrawString(det, detFont, db, lx, ly + 11);
                         }
                     }
@@ -627,8 +721,6 @@ namespace TradePhantoms
         {
             int h = MarkerSize;
             int w = MarkerSize / 2;
-            // Demand: diamond points UP from zone bottom (arrow up into zone)
-            // Supply: diamond points DOWN from zone top (arrow down into zone)
             Point[] pts = isDemand
                 ? new[] { new Point(x,     y),
                           new Point(x + w, y + h),
@@ -654,7 +746,7 @@ namespace TradePhantoms
                 string dir = sig.IsDemand ? "DEMAND" : "SUPPLY";
                 string msg = $"[IOF Signal] {sig.Grade} {sig.Total}/100 | {dir} @ {sig.Price:F2} | " +
                              $"Touch#{sig.TouchNum} | Z:{sig.ZoneQ} D:{sig.DeltaQ} A:{sig.AbsQ} " +
-                             $"S:{sig.DayQ} M:{sig.MetQ} F:{sig.FreshQ}";
+                             $"S:{sig.DayQ} F:{sig.FreshQ}";
                 Core.Instance.Loggers.Log(msg, LoggingLevel.Trading);
             }
             catch { }
@@ -676,11 +768,12 @@ namespace TradePhantoms
                 _openCsvPath = CsvPath;
                 if (!exists)
                     _csvWriter.WriteLine(
-                        "ts,symbol,tf,price,zone_id,is_demand,zone_score_raw,zone_type," +
-                        "touch_num,total,grade,zone_q,delta_q,abs_q,day_q,met_q,fresh_q," +
-                        "ib_formed,ib_high,ib_low,bar_delta,bar_close,bar_open,bar_high,bar_low,bar_volume");
+                        "ts,symbol,tf,price,zone_id,is_demand,zone_score_raw,touch_num," +
+                        "total,grade,zone_q,delta_q,abs_q,day_q,fresh_q," +
+                        "ib_formed,ib_high,ib_low," +
+                        "bar_delta,bar_close,bar_open,bar_high,bar_low,bar_volume");
             }
-            catch { _csvWriter = null; }
+            catch { }
         }
 
         private void TryLog(SeSignal sig, HistoryItemBar bar)
@@ -690,22 +783,22 @@ namespace TradePhantoms
                 EnsureCsv();
                 if (_csvWriter == null) return;
                 double delta = GetBarDelta(bar);
+                string sym = Symbol?.Name ?? "";
+                string tf  = HistoricalData?.Aggregation?.ToString() ?? "";
                 _csvWriter.WriteLine(
                     $"{sig.BarTime:yyyy-MM-dd HH:mm:ss}," +
-                    $"{Symbol?.Name ?? ""}," +
-                    $"{HistoricalData?.Aggregation?.ToString() ?? ""}," +
+                    $"{sym},{tf}," +
                     $"{sig.Price:F2}," +
                     $"{sig.ZoneId}," +
                     $"{(sig.IsDemand ? 1 : 0)}," +
-                    $"{sig.ZoneQ:F1}," +
-                    $"{(sig.IsDemand ? "demand" : "supply")}," +
+                    $"{sig.ZoneScoreRaw:F2}," +
                     $"{sig.TouchNum}," +
                     $"{sig.Total}," +
                     $"{sig.Grade}," +
-                    $"{sig.ZoneQ},{sig.DeltaQ},{sig.AbsQ},{sig.DayQ},{sig.MetQ},{sig.FreshQ}," +
+                    $"{sig.ZoneQ},{sig.DeltaQ},{sig.AbsQ},{sig.DayQ},{sig.FreshQ}," +
                     $"{(_ibFormed ? 1 : 0)}," +
                     $"{(_ibFormed ? _ibHigh.ToString("F2") : "")}," +
-                    $"{(_ibFormed ? _ibLow.ToString("F2") : "")}," +
+                    $"{(_ibFormed ? _ibLow.ToString("F2")  : "")}," +
                     $"{delta:F0},{bar.Close:F2},{bar.Open:F2},{bar.High:F2},{bar.Low:F2},{bar.Volume:F0}");
             }
             catch { }
@@ -719,20 +812,6 @@ namespace TradePhantoms
         }
 
         // ── Utility ───────────────────────────────────────────────────────────────
-
-        private string BuildRegKey()
-        {
-            try
-            {
-                string sym    = Symbol?.Name ?? "UNK";
-                string period = HistoricalData?.Aggregation?.ToString() ?? "UNK";
-                return $"{sym}_{period}";
-            }
-            catch { return ""; }
-        }
-
-        private static string ZoneKey(ZoneSnapshot z)
-            => $"{z.Type}_{z.Top:F4}_{z.Bottom:F4}";
 
         private static int Clamp(int v, int lo, int hi)
             => v < lo ? lo : v > hi ? hi : v;
@@ -748,12 +827,13 @@ namespace TradePhantoms
             public string   ZoneId;
             public int      Total;
             public string   Grade;
-            public int      ZoneQ, DeltaQ, AbsQ, DayQ, MetQ, FreshQ;
+            public int      ZoneQ, DeltaQ, AbsQ, DayQ, FreshQ;
             public int      TouchNum;
+            public double   ZoneScoreRaw;
         }
 
         private readonly record struct ScoreResult(
             int Total, string Grade,
-            int ZoneQ, int DeltaQ, int AbsQ, int DayQ, int MetQ, int FreshQ);
+            int ZoneQ, int DeltaQ, int AbsQ, int DayQ, int FreshQ);
     }
 }
