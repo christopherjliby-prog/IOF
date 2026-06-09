@@ -31,6 +31,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Reflection;
 using TradingPlatform.BusinessLayer;
 
 namespace TradePhantoms
@@ -74,17 +75,24 @@ namespace TradePhantoms
         [InputParameter("Use volume profile fallback", 8)]
         public bool UseVpFallback = false;
 
+        // ── Auto-discover DOM property ─────────────────────────────────────────────
+        [InputParameter("Auto-discover DOM property (reflection)", 9)]
+        public bool AutoDiscoverDom = false;
+
         // ── Volume normalization ───────────────────────────────────────────────────
-        [InputParameter("Volume scale (0=auto)", 9, 0, 100000, 100, 0)]
+        [InputParameter("Volume scale (0=auto)", 10, 0, 100000, 100, 0)]
         public int ManualVolumeScale = 0;
 
         // ── Internal ──────────────────────────────────────────────────────────────
-        private readonly List<BarSnapshot>   _history     = new List<BarSnapshot>();
-        private readonly object              _lock        = new object();
-        private double                       _maxVolSeen  = 1.0;
-        private bool                         _domFailed   = false;
-        private bool                         _vaLoaded    = false;
-        private string                       _statusMsg   = "";
+        private readonly List<BarSnapshot>   _history          = new List<BarSnapshot>();
+        private readonly object              _lock             = new object();
+        private double                       _maxVolSeen       = 1.0;
+        private bool                         _domFailed        = false;
+        private bool                         _vaLoaded         = false;
+        private string                       _statusMsg        = "";
+        private string                       _discoveredProp   = null;
+        private string                       _discoveredBids   = null;
+        private string                       _discoveredAsks   = null;
         private Font                         _labelFont;
         private Font                         _statusFont;
 
@@ -135,12 +143,169 @@ namespace TradePhantoms
             CaptureDOM();
         }
 
+        // ── DOM property discovery ────────────────────────────────────────────────
+
+        // Scans Symbol via reflection to find the first property that looks like
+        // a DOM/depth object with Bids and Asks collections. Caches result so it
+        // only runs once per indicator load.
+        private bool DiscoverDomProperty()
+        {
+            if (_discoveredProp != null) return true;
+            if (Symbol == null) return false;
+
+            try
+            {
+                var symbolType = Symbol.GetType();
+                var allProps   = symbolType.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+                // Candidate DOM property names (ordered by likelihood)
+                var domCandidates = new[]
+                {
+                    "DepthOfMarket", "DOMItems", "OrderBook", "Level2",
+                    "DOM", "Depth", "MarketDepth", "BookDepth", "L2"
+                };
+
+                // First pass: try known names
+                foreach (var name in domCandidates)
+                {
+                    var prop = symbolType.GetProperty(name,
+                        BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                    if (prop == null) continue;
+
+                    var val = prop.GetValue(Symbol);
+                    if (val == null) continue;
+
+                    var (bids, asks) = FindBidsAsks(val);
+                    if (bids != null && asks != null)
+                    {
+                        _discoveredProp = prop.Name;
+                        _discoveredBids = bids;
+                        _discoveredAsks = asks;
+                        _statusMsg = $"DOM discovered: Symbol.{_discoveredProp} (bids={_discoveredBids}, asks={_discoveredAsks})";
+                        return true;
+                    }
+                }
+
+                // Second pass: scan all properties
+                foreach (var prop in allProps)
+                {
+                    try
+                    {
+                        var val = prop.GetValue(Symbol);
+                        if (val == null) continue;
+                        var (bids, asks) = FindBidsAsks(val);
+                        if (bids != null && asks != null)
+                        {
+                            _discoveredProp = prop.Name;
+                            _discoveredBids = bids;
+                            _discoveredAsks = asks;
+                            _statusMsg = $"DOM discovered: Symbol.{_discoveredProp} (bids={_discoveredBids}, asks={_discoveredAsks})";
+                            return true;
+                        }
+                    }
+                    catch { }
+                }
+
+                // Log all property names so user can report back
+                var names = string.Join(", ", allProps.Select(p => p.Name));
+                _statusMsg = $"DOM not found. Symbol properties: {names}";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _statusMsg = $"Discovery error: {ex.Message}";
+                return false;
+            }
+        }
+
+        // Looks for Bids/Asks collection properties on a candidate DOM object.
+        private (string Bids, string Asks) FindBidsAsks(object domObj)
+        {
+            var t    = domObj.GetType();
+            var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+            string bids = null, asks = null;
+            var bidNames = new[] { "Bids", "BidItems", "BidSide", "Bid", "BuyOrders" };
+            var askNames = new[] { "Asks", "AskItems", "AskSide", "Ask", "SellOrders", "Offers" };
+
+            foreach (var p in props)
+            {
+                var n = p.Name;
+                if (bids == null && bidNames.Any(b => string.Equals(b, n, StringComparison.OrdinalIgnoreCase)))
+                    bids = p.Name;
+                if (asks == null && askNames.Any(a => string.Equals(a, n, StringComparison.OrdinalIgnoreCase)))
+                    asks = p.Name;
+                if (bids != null && asks != null) return (bids, asks);
+            }
+            return (null, null);
+        }
+
+        // Reads items from a discovered bid or ask collection using reflection.
+        private void ReadDomSide(object domObj, string propName, bool isBid, BarSnapshot snap)
+        {
+            try
+            {
+                var items = domObj.GetType()
+                    .GetProperty(propName, BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(domObj) as System.Collections.IEnumerable;
+
+                if (items == null) return;
+
+                int count = 0;
+                foreach (var item in items)
+                {
+                    if (count++ >= DomDepth) break;
+                    var itype = item.GetType();
+
+                    double price = 0, size = 0;
+                    foreach (var p in itype.GetProperties())
+                    {
+                        var pn = p.Name.ToLowerInvariant();
+                        if (pn == "price" || pn == "level" || pn == "rate")
+                            price = Convert.ToDouble(p.GetValue(item));
+                        else if (pn == "size" || pn == "volume" || pn == "quantity" || pn == "qty")
+                            size = Convert.ToDouble(p.GetValue(item));
+                    }
+
+                    if (price <= 0 || size <= 0) continue;
+                    var level = snap.Levels.Find(l => l.Price == price);
+                    if (level == null) { level = new DomLevel { Price = price }; snap.Levels.Add(level); }
+                    if (isBid) level.BidVol += size;
+                    else       level.AskVol += size;
+                }
+            }
+            catch { }
+        }
+
         // ── DOM capture ───────────────────────────────────────────────────────────
 
         private void CaptureDOM()
         {
             try
             {
+                // Auto-discover path
+                if (AutoDiscoverDom)
+                {
+                    if (!DiscoverDomProperty()) { _domFailed = true; return; }
+
+                    var domObj = Symbol.GetType()
+                        .GetProperty(_discoveredProp, BindingFlags.Public | BindingFlags.Instance)
+                        ?.GetValue(Symbol);
+
+                    if (domObj == null) { _domFailed = true; return; }
+
+                    var snap = new BarSnapshot { Time = Time(0) };
+                    ReadDomSide(domObj, _discoveredBids, true,  snap);
+                    ReadDomSide(domObj, _discoveredAsks, false, snap);
+
+                    if (snap.Levels.Count == 0) { _domFailed = true; return; }
+                    snap.MaxTotal = snap.Levels.Max(l => l.Total);
+                    _domFailed = false;
+                    CommitSnapshot(snap);
+                    return;
+                }
+
+                // Standard dynamic path
                 dynamic dom = Symbol?.DepthOfMarket;
                 if (dom == null)
                 {
@@ -149,7 +314,7 @@ namespace TradePhantoms
                     return;
                 }
 
-                var snap = new BarSnapshot { Time = Time(0) };
+                var snap2 = new BarSnapshot { Time = Time(0) };
 
                 // Bids (buy side)
                 try
@@ -161,8 +326,8 @@ namespace TradePhantoms
                         double price = (double)item.Price;
                         double size  = (double)item.Size;
                         if (size <= 0) continue;
-                        var level = snap.Levels.Find(l => l.Price == price);
-                        if (level == null) { level = new DomLevel { Price = price }; snap.Levels.Add(level); }
+                        var level = snap2.Levels.Find(l => l.Price == price);
+                        if (level == null) { level = new DomLevel { Price = price }; snap2.Levels.Add(level); }
                         level.BidVol += size;
                     }
                 }
@@ -178,24 +343,24 @@ namespace TradePhantoms
                         double price = (double)item.Price;
                         double size  = (double)item.Size;
                         if (size <= 0) continue;
-                        var level = snap.Levels.Find(l => l.Price == price);
-                        if (level == null) { level = new DomLevel { Price = price }; snap.Levels.Add(level); }
+                        var level = snap2.Levels.Find(l => l.Price == price);
+                        if (level == null) { level = new DomLevel { Price = price }; snap2.Levels.Add(level); }
                         level.AskVol += size;
                     }
                 }
                 catch { }
 
-                if (snap.Levels.Count == 0)
+                if (snap2.Levels.Count == 0)
                 {
                     _domFailed = true;
-                    _statusMsg = "No DOM data received — check Level2 subscription or enable VP fallback";
+                    _statusMsg = "No DOM data received — enable 'Auto-discover DOM property' or VP fallback";
                     return;
                 }
 
-                snap.MaxTotal = snap.Levels.Max(l => l.Total);
+                snap2.MaxTotal = snap2.Levels.Max(l => l.Total);
                 _domFailed = false;
                 _statusMsg = "";
-                CommitSnapshot(snap);
+                CommitSnapshot(snap2);
             }
             catch (Exception ex)
             {
