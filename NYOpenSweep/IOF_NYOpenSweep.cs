@@ -60,9 +60,6 @@ namespace IOF_NYOpenSweep
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            if (args.Reason == UpdateReason.HistoricalBar && Count > 5)
-                return; // only process on live/new bars after initial load — we'll scan history in OnInit via full pass
-
             ProcessBar(Count - 1);
         }
 
@@ -87,6 +84,7 @@ namespace IOF_NYOpenSweep
                 _lowSwept    = false;
                 _setupDrawn  = false;
                 _sweepBarIndex = -1;
+                // drawings accumulate across all days for backtesting — do not clear
             }
 
             // ── Identify NY open bars (first 3 × 5m = 15m candle) ───────────
