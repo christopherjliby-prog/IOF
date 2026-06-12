@@ -12,13 +12,13 @@ namespace IOF_NYOpenSweep
         public Color RangeColor = Color.DodgerBlue;
 
         [InputParameter("Active trade color", 20)]
-        public Color ActiveColor = Color.FromArgb(80, 30, 144, 255);   // dodger blue
+        public Color ActiveColor = Color.FromArgb(80, 30, 144, 255);
 
         [InputParameter("Resolved trade color", 30)]
-        public Color ResolvedColor = Color.FromArgb(80, 200, 50, 50);  // red
+        public Color ResolvedColor = Color.FromArgb(80, 200, 50, 50);
 
-        [InputParameter("Show R:R label", 40)]
-        public bool ShowRR = true;
+        [InputParameter("Show labels", 40)]
+        public bool ShowLabels = true;
 
         [InputParameter("Risk per trade ($)", 50)]
         public double RiskDollars = 200.0;
@@ -38,16 +38,16 @@ namespace IOF_NYOpenSweep
         }
 
         // ── State per day ────────────────────────────────────────────────────
-        private DateTime _currentDay     = DateTime.MinValue;
-        private double   _range15High    = double.NaN;
-        private double   _range15Low     = double.NaN;
-        private bool     _range15Built   = false;
+        private DateTime _currentDay    = DateTime.MinValue;
+        private double   _range15High   = double.NaN;
+        private double   _range15Low    = double.NaN;
+        private bool     _range15Built  = false;
         private DateTime _rangeStartTime;
 
-        private bool   _highSwept     = false;
-        private bool   _lowSwept      = false;
-        private bool   _setupDrawn    = false;
-        private int    _sweepBarIndex = -1;
+        private bool _highSwept     = false;
+        private bool _lowSwept      = false;
+        private bool _setupDrawn    = false;
+        private int  _sweepBarIndex = -1;
 
         // ── Per-trade resolution tracking ────────────────────────────────────
         private int    _currentSetId  = -1;
@@ -85,8 +85,6 @@ namespace IOF_NYOpenSweep
             var bar = (HistoryItemBar)HistoricalData[i];
             if (bar == null) return;
 
-            // Convert to Eastern Time — reliable for both live and historical bars
-            // on any chart timeframe.
             DateTime barEt  = TimeZoneInfo.ConvertTime(bar.TimeLeft, EasternTz);
             DateTime barDay = barEt.Date;
             TimeSpan barTod = barEt.TimeOfDay;
@@ -108,7 +106,6 @@ namespace IOF_NYOpenSweep
                 _tradeStop     = double.NaN;
                 _tradeTarget   = double.NaN;
                 _currentSetId  = -1;
-                // drawings accumulate across days for backtesting
             }
 
             // ── Check if active trade resolved (TP or SL hit) ────────────────
@@ -137,7 +134,6 @@ namespace IOF_NYOpenSweep
                 {
                     _range15Built = true;
                     DrawRangeLines();
-                    // fall through — this bar may be the sweep
                 }
                 else
                 {
@@ -182,9 +178,17 @@ namespace IOF_NYOpenSweep
 
         private void DrawRangeLines()
         {
-            DateTime end = _rangeStartTime.AddHours(8);
-            _lines.Add(new LineToDraw(_range15High, _rangeStartTime, end, RangeColor, "15m High"));
-            _lines.Add(new LineToDraw(_range15Low,  _rangeStartTime, end, RangeColor, "15m Low"));
+            DateTime end    = _rangeStartTime.AddHours(8);
+            DateTime lblOff = _rangeStartTime.AddMinutes(2);
+
+            _lines.Add(new LineToDraw(_range15High, _rangeStartTime, end, RangeColor));
+            _lines.Add(new LineToDraw(_range15Low,  _rangeStartTime, end, RangeColor));
+
+            if (ShowLabels)
+            {
+                _labels.Add(new LabelToDraw(lblOff, _range15High, "15m NY open  ▲", Color.DodgerBlue, -1));
+                _labels.Add(new LabelToDraw(lblOff, _range15Low,  "15m NY open  ▼", Color.DodgerBlue, -1));
+            }
         }
 
         private void DrawLongSetup(HistoryItemBar bar, double entry, double stop, double target)
@@ -196,25 +200,31 @@ namespace IOF_NYOpenSweep
 
             DateTime t0   = bar.TimeLeft;
             DateTime tEnd = t0.AddHours(6);
+            DateTime lbl  = t0.AddMinutes(3);
 
-            // Risk zone: stop → entry (narrow, entry candle width)
-            _boxes.Add(new BoxToDraw(t0, t0.AddMinutes(10), stop, entry,  ActiveColor, _currentSetId));
+            double risk      = Math.Abs(entry - stop);
+            double reward    = Math.Abs(target - entry);
+            double rr        = risk > 0 ? reward / risk : 0;
+            int    contracts = ContractCount(risk);
+            double dollarRisk = contracts * risk * DollarsPerPoint;
 
-            // Reward zone: entry → target (wide, spans session)
-            var rewardColor = Color.FromArgb(40, ActiveColor.R, ActiveColor.G, ActiveColor.B);
-            _boxes.Add(new BoxToDraw(t0, tEnd, entry, target, rewardColor, _currentSetId));
+            // Narrow risk box (entry candle width): stop → entry
+            _boxes.Add(new BoxToDraw(t0, t0.AddMinutes(10), stop, entry, ActiveColor, _currentSetId));
 
-            // Target line
-            _lines.Add(new LineToDraw(target, t0, tEnd, Color.FromArgb(200, 30, 200, 80), "TP"));
+            // Wide reward fill: entry → target
+            var rewardFill = Color.FromArgb(35, ActiveColor.R, ActiveColor.G, ActiveColor.B);
+            _boxes.Add(new BoxToDraw(t0, tEnd, entry, target, rewardFill, _currentSetId));
 
-            if (ShowRR)
+            // Horizontal lines for each level
+            _lines.Add(new LineToDraw(entry,  t0, tEnd, Color.FromArgb(200, 50, 205, 50)));    // lime
+            _lines.Add(new LineToDraw(stop,   t0, tEnd, Color.FromArgb(200, 220, 60, 60)));    // red
+            _lines.Add(new LineToDraw(target, t0, tEnd, Color.FromArgb(200, 50, 205, 50)));    // lime dashed
+
+            if (ShowLabels)
             {
-                double risk      = Math.Abs(entry - stop);
-                double reward    = Math.Abs(target - entry);
-                double rr        = risk > 0 ? reward / risk : 0;
-                int    contracts = ContractCount(risk);
-                string lbl       = $"L  {contracts}ct  E:{entry:F2}  SL:{stop:F2}  TP:{target:F2}  {rr:F1}R";
-                _labels.Add(new LabelToDraw(t0.AddMinutes(12), entry, lbl, Color.FromArgb(220, 100, 220, 100), _currentSetId));
+                _labels.Add(new LabelToDraw(lbl, target, $"15m High  |  TP {target:F2}  |  {rr:F1}R", Color.FromArgb(220, 100, 230, 100), _currentSetId));
+                _labels.Add(new LabelToDraw(lbl, entry,  $"Long Entry  {entry:F2}  |  {contracts}ct  (~${dollarRisk:F0} risk)", Color.FromArgb(220, 100, 230, 100), _currentSetId));
+                _labels.Add(new LabelToDraw(lbl, stop,   $"5m Sweep & Stop  {stop:F2}", Color.FromArgb(220, 220, 80, 80), _currentSetId));
             }
         }
 
@@ -227,33 +237,38 @@ namespace IOF_NYOpenSweep
 
             DateTime t0   = bar.TimeLeft;
             DateTime tEnd = t0.AddHours(6);
+            DateTime lbl  = t0.AddMinutes(3);
 
-            // Risk zone: entry → stop (narrow)
+            double risk      = Math.Abs(stop - entry);
+            double reward    = Math.Abs(entry - target);
+            double rr        = risk > 0 ? reward / risk : 0;
+            int    contracts = ContractCount(risk);
+            double dollarRisk = contracts * risk * DollarsPerPoint;
+
+            // Narrow risk box: entry → stop
             _boxes.Add(new BoxToDraw(t0, t0.AddMinutes(10), entry, stop, ActiveColor, _currentSetId));
 
-            // Reward zone: target → entry (wide)
-            var rewardColor = Color.FromArgb(40, ActiveColor.R, ActiveColor.G, ActiveColor.B);
-            _boxes.Add(new BoxToDraw(t0, tEnd, target, entry, rewardColor, _currentSetId));
+            // Wide reward fill: target → entry
+            var rewardFill = Color.FromArgb(35, ActiveColor.R, ActiveColor.G, ActiveColor.B);
+            _boxes.Add(new BoxToDraw(t0, tEnd, target, entry, rewardFill, _currentSetId));
 
-            // Target line
-            _lines.Add(new LineToDraw(target, t0, tEnd, Color.FromArgb(200, 220, 80, 30), "TP"));
+            // Horizontal lines for each level
+            _lines.Add(new LineToDraw(entry,  t0, tEnd, Color.FromArgb(200, 220, 100, 50)));   // orange
+            _lines.Add(new LineToDraw(stop,   t0, tEnd, Color.FromArgb(200, 220, 60, 60)));    // red
+            _lines.Add(new LineToDraw(target, t0, tEnd, Color.FromArgb(200, 220, 100, 50)));   // orange dashed
 
-            if (ShowRR)
+            if (ShowLabels)
             {
-                double risk      = Math.Abs(stop - entry);
-                double reward    = Math.Abs(entry - target);
-                double rr        = risk > 0 ? reward / risk : 0;
-                int    contracts = ContractCount(risk);
-                string lbl       = $"S  {contracts}ct  E:{entry:F2}  SL:{stop:F2}  TP:{target:F2}  {rr:F1}R";
-                _labels.Add(new LabelToDraw(t0.AddMinutes(12), entry, lbl, Color.FromArgb(220, 220, 120, 60), _currentSetId));
+                _labels.Add(new LabelToDraw(lbl, target, $"15m Low  |  TP {target:F2}  |  {rr:F1}R", Color.FromArgb(220, 230, 130, 60), _currentSetId));
+                _labels.Add(new LabelToDraw(lbl, entry,  $"Short Entry  {entry:F2}  |  {contracts}ct  (~${dollarRisk:F0} risk)", Color.FromArgb(220, 230, 130, 60), _currentSetId));
+                _labels.Add(new LabelToDraw(lbl, stop,   $"5m Sweep & Stop  {stop:F2}", Color.FromArgb(220, 220, 80, 80), _currentSetId));
             }
         }
 
         private int ContractCount(double riskPoints)
         {
             if (riskPoints <= 0 || DollarsPerPoint <= 0) return 1;
-            double riskPerContract = riskPoints * DollarsPerPoint;
-            int    contracts       = (int)Math.Floor(RiskDollars / riskPerContract);
+            int contracts = (int)Math.Floor(RiskDollars / (riskPoints * DollarsPerPoint));
             return Math.Max(1, Math.Min(10, contracts));
         }
 
@@ -267,21 +282,6 @@ namespace IOF_NYOpenSweep
             if (chart == null) return;
             var window = chart.MainWindow;
 
-            // Range + target lines
-            foreach (var l in _lines)
-            {
-                try
-                {
-                    float x0 = (float)window.CoordinatesConverter.GetChartX(l.T0);
-                    float x1 = (float)window.CoordinatesConverter.GetChartX(l.T1);
-                    float y  = (float)window.CoordinatesConverter.GetChartY(l.Price);
-                    using var pen = new Pen(l.Color, 1) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
-                    gr.DrawLine(pen, x0, y, x1, y);
-                }
-                catch { }
-            }
-
-            // Entry/risk/reward boxes — resolved trades show in red
             foreach (var b in _boxes)
             {
                 try
@@ -297,22 +297,34 @@ namespace IOF_NYOpenSweep
                     float yt = Math.Min(y0, y1);
                     using var br  = new SolidBrush(fill);
                     gr.FillRectangle(br, xl, yt, w, h);
-                    using var pen = new Pen(Color.FromArgb(160, fill.R, fill.G, fill.B), 1f);
+                    using var pen = new Pen(Color.FromArgb(140, fill.R, fill.G, fill.B), 1f);
                     gr.DrawRectangle(pen, xl, yt, w, h);
                 }
                 catch { }
             }
 
-            // Labels
+            foreach (var l in _lines)
+            {
+                try
+                {
+                    float x0 = (float)window.CoordinatesConverter.GetChartX(l.T0);
+                    float x1 = (float)window.CoordinatesConverter.GetChartX(l.T1);
+                    float y  = (float)window.CoordinatesConverter.GetChartY(l.Price);
+                    using var pen = new Pen(l.Color, 1) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dash };
+                    gr.DrawLine(pen, x0, y, x1, y);
+                }
+                catch { }
+            }
+
             foreach (var lbl in _labels)
             {
                 try
                 {
                     float x = (float)window.CoordinatesConverter.GetChartX(lbl.Time);
                     float y = (float)window.CoordinatesConverter.GetChartY(lbl.Price);
-                    using var font = new Font("Arial", 8f);
+                    using var font = new Font("Arial", 8f, FontStyle.Bold);
                     using var br   = new SolidBrush(lbl.Color);
-                    gr.DrawString(lbl.Text, font, br, x, y - 12);
+                    gr.DrawString(lbl.Text, font, br, x, y - 14);
                 }
                 catch { }
             }
@@ -321,9 +333,9 @@ namespace IOF_NYOpenSweep
         // ── Data classes ─────────────────────────────────────────────────────
         private class LineToDraw
         {
-            public double Price; public DateTime T0, T1; public Color Color; public string Tag;
-            public LineToDraw(double price, DateTime t0, DateTime t1, Color color, string tag)
-            { Price = price; T0 = t0; T1 = t1; Color = color; Tag = tag; }
+            public double Price; public DateTime T0, T1; public Color Color;
+            public LineToDraw(double price, DateTime t0, DateTime t1, Color color)
+            { Price = price; T0 = t0; T1 = t1; Color = color; }
         }
         private class BoxToDraw
         {
