@@ -72,7 +72,9 @@ namespace IOF_NYOpenSweep
 
         protected override void OnInit()
         {
-            AddLineSeries("_dummy", Color.Transparent, 1, LineStyle.Solid);
+            // Alpha=1 makes it invisible on the chart but gives the indicator
+            // a real legend entry so right-click → Settings / Remove works.
+            AddLineSeries("IOF NY Open Sweep", Color.FromArgb(1, 128, 128, 128), 1, LineStyle.Solid);
         }
 
         protected override void OnUpdate(UpdateArgs args)
