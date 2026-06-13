@@ -115,6 +115,7 @@ namespace IOF_GatePanel
         {
             SetValue(double.NaN);
             UpdateDailyTracking();
+            AutoSyncFromPendingOrders();
             UpdateCalculations();
         }
 
@@ -135,6 +136,49 @@ namespace IOF_GatePanel
             if (account == null) return;
             if (_sessionHighEquity <= 0) _sessionHighEquity = account.Balance;
             _dailyPnL = account.Balance - _sessionHighEquity;
+        }
+
+        // ── Auto-sync prices from pending DOM orders ─────────────────
+
+        private void AutoSyncFromPendingOrders()
+        {
+            try
+            {
+                string inst = Instruments[_instIdx];
+                var account = GetAccount();
+
+                // Find the most recent open limit order on this instrument
+                Order entry = null;
+                DateTime newest = DateTime.MinValue;
+                foreach (var o in Core.Instance.Orders)
+                {
+                    if (o == null || o.Symbol == null) continue;
+                    if (!o.Symbol.Name.StartsWith(inst, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (account != null && o.Account?.Id != account.Id) continue;
+                    if (o.Status != OrderStatus.Opened && o.Status != OrderStatus.Unspecified) continue;
+                    if (!string.Equals(o.OrderTypeId, "Limit", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (o.LastUpdateTime > newest) { newest = o.LastUpdateTime; entry = o; }
+                }
+
+                if (entry == null) return;
+
+                // Entry price and direction
+                if (entry.Price > 0) EntryPrice = entry.Price;
+                _isLong = entry.Side == Side.Buy;
+
+                // Stop from bracket SL if present
+                if (entry.StopLoss != null && entry.StopLoss.Price > 0)
+                    StopPrice = entry.StopLoss.Price;
+
+                // Target from bracket TP if present
+                if (entry.TakeProfit != null && entry.TakeProfit.Price > 0)
+                    TargetPrice = entry.TakeProfit.Price;
+
+                // Contracts from order quantity (capped at 10)
+                if (entry.TotalQuantity > 0)
+                    _contracts = Math.Max(1, Math.Min(10, (int)entry.TotalQuantity));
+            }
+            catch { }
         }
 
         // ── Position sizing ──────────────────────────────────────────
@@ -249,19 +293,29 @@ namespace IOF_GatePanel
             var entrySide = _isLong ? Side.Buy : Side.Sell;
             var exitSide  = _isLong ? Side.Sell : Side.Buy;
 
-            // Entry — limit order at EntryPrice
-            var entryResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
-            {
-                Symbol      = sym,
-                Account     = account,
-                Side        = entrySide,
-                OrderTypeId = "Limit",
-                Price       = EntryPrice,
-                Quantity    = _contracts,
-                TimeInForce = TimeInForce.Day
-            });
+            // Check if entry limit is already pending from DOM — if so, skip re-submitting it
+            bool entryAlreadyPending = Core.Instance.Orders.Any(o =>
+                o != null && o.Symbol != null &&
+                o.Symbol.Name.StartsWith(Instruments[_instIdx], StringComparison.OrdinalIgnoreCase) &&
+                o.Account?.Id == account.Id &&
+                o.Status == OrderStatus.Opened &&
+                string.Equals(o.OrderTypeId, "Limit", StringComparison.OrdinalIgnoreCase) &&
+                o.Side == entrySide);
 
-            if (entryResult.Status != TradingOperationResultStatus.Success) return;
+            if (!entryAlreadyPending)
+            {
+                var entryResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
+                {
+                    Symbol      = sym,
+                    Account     = account,
+                    Side        = entrySide,
+                    OrderTypeId = "Limit",
+                    Price       = EntryPrice,
+                    Quantity    = _contracts,
+                    TimeInForce = TimeInForce.Day
+                });
+                if (entryResult.Status != TradingOperationResultStatus.Success) return;
+            }
 
             // Stop loss — GTC stop order
             Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
