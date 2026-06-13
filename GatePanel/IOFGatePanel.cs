@@ -53,7 +53,7 @@ namespace IOF_GatePanel
             "Exit architecture declared"
         };
         private static readonly bool[] CheckCritical = {
-            true, false, false, true, true, false, false, false, true, true, true
+            true, false, false, true, true, false, false, false, false, false, false
         };
 
         // ── Daily tracking ───────────────────────────────────────────
@@ -249,13 +249,14 @@ namespace IOF_GatePanel
             var entrySide = _isLong ? Side.Buy : Side.Sell;
             var exitSide  = _isLong ? Side.Sell : Side.Buy;
 
-            // Entry — market order
+            // Entry — limit order at EntryPrice
             var entryResult = Core.Instance.PlaceOrder(new PlaceOrderRequestParameters
             {
                 Symbol      = sym,
                 Account     = account,
                 Side        = entrySide,
-                OrderTypeId = "Market",
+                OrderTypeId = "Limit",
+                Price       = EntryPrice,
                 Quantity    = _contracts,
                 TimeInForce = TimeInForce.Day
             });
