@@ -559,6 +559,7 @@ namespace IOF_GatePanel
         private void OnMouseClick(object sender, ChartMouseNativeEventArgs e)
         {
             if (e == null) return;
+            if (e.Button != NativeMouseButtons.Left) return;
             e.NeedRedraw = true;
             var pt = new PointF(e.X, e.Y);
 
