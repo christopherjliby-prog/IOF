@@ -190,13 +190,19 @@ namespace IOF_GatePanel
             _riskDollars = 0;
             _stopTicks   = 0;
 
-            if (EntryPrice <= 0 || StopPrice <= 0 || TargetPrice <= 0) return;
+            if (EntryPrice <= 0 || StopPrice <= 0) return;
 
             double tickSz  = GetTickSize();
             double tickVal = GetTickValue();
             if (tickSz <= 0 || tickVal <= 0) return;
 
-            double riskPts   = Math.Abs(EntryPrice - StopPrice);
+            double riskPts = Math.Abs(EntryPrice - StopPrice);
+
+            // Auto-set 2:1 target whenever Entry + Stop are known
+            TargetPrice = _isLong
+                ? EntryPrice + 2.0 * riskPts
+                : EntryPrice - 2.0 * riskPts;
+
             double rewardPts = Math.Abs(TargetPrice - EntryPrice);
 
             _stopTicks = (int)Math.Round(riskPts / tickSz);
