@@ -79,6 +79,7 @@ namespace IOF_NYOpenSweep
 
         protected override void OnUpdate(UpdateArgs args)
         {
+            SetValue(double.NaN);
             ProcessBar(Count - 1);
         }
 
