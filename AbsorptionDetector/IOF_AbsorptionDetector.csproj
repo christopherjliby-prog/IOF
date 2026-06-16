@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>IOF_AbsorptionDetector</AssemblyName>
+    <RootNamespace>IOF_AbsorptionDetector</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>./bin/Release/</OutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TradingPlatform.BusinessLayer">
+      <HintPath>../refs/TradingPlatform.BusinessLayer.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
