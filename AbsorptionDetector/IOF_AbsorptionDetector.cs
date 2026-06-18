@@ -1,25 +1,27 @@
-// IOF_AbsorptionDetector.cs — Absorption → Exhaustion → Aggression-Flip detector
+// IOF_AbsorptionDetector.cs — Absorption / Exhaustion → Aggression-Flip detector
 //
-// Detects the IOF absorption signature in real time from bar-level delta and
-// fires an alert at the EXHAUSTION bar — the actionable moment, before the
-// flip prints. Confirms on the following flip bar.
+// Detects TWO distinct reversal signatures (per spec) and labels each:
 //
-// This indicator does NOT place orders. It flags. The trader decides.
-// Gate panel (separate indicator) owns execution.
+//   ABSORPTION  — elevated volume + delta-close divergence (heavy delta, opposing close).
+//                 Someone big is actively soaking the aggression. Volume stays UP.
+//                 Example: sellers hit -1072/-2076/-803, then delta -81 BUT bar closes
+//                 GREEN at 30,407 → sellers got absorbed.
 //
-// Validated against MNQ, June 16 2026, ~8:45-8:51 AM PT, 30,407 low:
-//   effort   : delta -1072, -2076, -803 (heavy one-sided selling, no new lows)
-//   exhaustion: delta -81  (effort collapses to near-zero on elevated volume)
-//   flip     : delta +2985 (opposite side takes the close)
+//   EXHAUSTION  — volume DRIES UP into the extreme. Move running out of gas on its own.
+//                 Delta weakens AND volume < ExhaustionVolDrop × prior average.
 //
-// Standalone project — does not modify TradePhantoms_IOF_v2.cs. Reads the IOF
-// zone registry (if present on the chart) via cross-DLL reflection, same
-// pattern as IOF_VolumeSpike — graceful no-op if the zone indicator isn't
-// loaded.
+// Alert sequence (same for both signature types):
+//   WATCH      → effort phase confirmed at the extreme, watching for the tell
+//   EXHAUSTION → tell bar just closed (actionable — before the flip)
+//   CONFIRMED  → flip bar printed (opposite-sign delta ≥ threshold)
 //
-// Confirmed SDK: TradingPlatform.BusinessLayer (see ../refs).
-// Delta/volume data path confirmed against TradePhantoms_IOF_v2.cs's proven
-// usage: bar.VolumeAnalysisData.Total.Delta, bar.Volume.
+// Validated acceptance test (MNQ 1m, June 16 2026 ~8:45-8:51 AM PT, 30,407 low):
+//   Effort:     delta -1072, -2076, -803
+//   Tell bar:   delta -81, close GREEN (= ABSORPTION, not exhaustion — vol stayed elevated)
+//   Flip bar:   delta +2985
+//
+// Detect-only. No orders. Trader decides. Gate panel executes.
+// Zone gate via IOFZoneRegistry cross-DLL reflection (graceful no-op if not loaded).
 
 using System;
 using System.Collections.Generic;
@@ -31,12 +33,12 @@ using TradingPlatform.BusinessLayer;
 namespace IOF_AbsorptionDetector
 {
     public enum AbsorptionSide { Demand, Supply }
-
-    public enum AlertLevel { Watch, Exhaustion, Confirmed }
+    public enum AlertLevel    { Watch, Exhaustion, Confirmed }
+    public enum SignatureType { Absorption, Exhaustion }   // the TWO distinct patterns
 
     public class IOF_AbsorptionDetector : Indicator, IVolumeAnalysisIndicator
     {
-        // ── Detection parameters (starting values — tune via LogAllCandidates) ──
+        // ── Detection parameters ─────────────────────────────────────────────────
 
         [InputParameter("Effort lookback (bars)", 10, 2, 50, 1, 0)]
         public int EffortLookback = 5;
@@ -47,11 +49,26 @@ namespace IOF_AbsorptionDetector
         [InputParameter("Effort min heavy bars", 30, 1, 20, 1, 0)]
         public int EffortMinBars = 2;
 
-        [InputParameter("Exhaustion delta max (abs)", 40, 1, 20000, 25, 0)]
+        [InputParameter("New-extreme lookback (bars)", 35, 2, 50, 1, 0)]
+        public int NewExtremeLookback = 5;
+
+        // ── Absorption signature (PRIMARY — delta-close divergence) ──────────────
+
+        [InputParameter("Divergence mode (primary absorption)", 40)]
+        public bool DivergenceMode = true;
+
+        [InputParameter("Exhaustion delta max (abs) — collapse form", 45, 1, 20000, 25, 0)]
         public int ExhaustionDeltaMax = 200;
 
-        [InputParameter("Exhaustion volume min", 50, 1, 1000000, 100, 0)]
+        [InputParameter("Absorption: volume min (elevated)", 50, 1, 1000000, 100, 0)]
         public int ExhaustionVolMin = 1500;
+
+        // ── Exhaustion signature (SECONDARY — volume drying up) ──────────────────
+
+        [InputParameter("Exhaustion: vol drop ratio (x prior avg)", 55, 0.1, 1.0, 0.05, 2)]
+        public double ExhaustionVolDrop = 0.6;
+
+        // ── Flip confirmation ────────────────────────────────────────────────────
 
         [InputParameter("Flip delta threshold (abs)", 60, 1, 20000, 50, 0)]
         public int FlipDeltaThreshold = 1000;
@@ -59,88 +76,87 @@ namespace IOF_AbsorptionDetector
         [InputParameter("Flip confirm window (bars)", 70, 1, 10, 1, 0)]
         public int FlipConfirmWindow = 3;
 
-        [InputParameter("New-extreme lookback (bars)", 80, 2, 50, 1, 0)]
-        public int NewExtremeLookback = 5;
+        // ── Zone gate ────────────────────────────────────────────────────────────
 
-        [InputParameter("Zone proximity (ticks)", 90, 0, 200, 1, 0)]
+        [InputParameter("Zone proximity (ticks)", 80, 0, 200, 1, 0)]
         public int ZoneProximityTicks = 20;
 
-        [InputParameter("Require zone context", 95)]
+        [InputParameter("Require zone context (gate all alerts)", 85)]
         public bool RequireZoneContext = false;
 
-        // ── Alerts / tuning ──────────────────────────────────────────────────────
+        // ── Alerts ────────────────────────────────────────────────────────────────
 
-        [InputParameter("Enable Watch pre-alert", 100)]
+        [InputParameter("Enable Watch pre-alert", 90)]
         public bool EnableWatchAlert = true;
 
-        [InputParameter("Sound on Exhaustion", 110)]
+        [InputParameter("Sound on Exhaustion alert", 100)]
         public bool SoundOnExhaustion = true;
 
-        [InputParameter("Sound on Confirmed", 120)]
+        [InputParameter("Sound on Confirmed alert", 110)]
         public bool SoundOnConfirmed = true;
 
-        [InputParameter("Log all candidates (tuning mode)", 130)]
+        // ── Tuning / logging ─────────────────────────────────────────────────────
+
+        [InputParameter("Log all candidates (tuning mode)", 120)]
         public bool LogAllCandidates = false;
 
-        [InputParameter("Log file path", 140)]
+        [InputParameter("Log file path", 130)]
         public string LogFilePath = "IOF_AbsorptionDetector_log.csv";
 
         // ── Display ──────────────────────────────────────────────────────────────
 
-        [InputParameter("Watch color", 150)]
+        [InputParameter("Watch color", 140)]
         public Color WatchColor = Color.FromArgb(255, 255, 215, 0);
 
-        [InputParameter("Exhaustion color", 160)]
+        [InputParameter("Exhaustion color", 150)]
         public Color ExhaustionColor = Color.FromArgb(255, 255, 140, 0);
 
-        [InputParameter("Confirmed long color", 170)]
+        [InputParameter("Confirmed long color", 160)]
         public Color ConfirmedLongColor = Color.FromArgb(255, 0, 200, 90);
 
-        [InputParameter("Confirmed short color", 180)]
+        [InputParameter("Confirmed short color", 170)]
         public Color ConfirmedShortColor = Color.FromArgb(255, 220, 40, 40);
 
         // ── Internal state ───────────────────────────────────────────────────────
 
-        private class PendingSignal
+        private class PendingConfirm
         {
             public AbsorptionSide Side;
-            public int            BarsSinceExhaustion;
-            public bool           Confirmed;
+            public SignatureType  Type;
+            public int            BarsSince;
         }
-
-        private readonly List<PendingSignal> _pending = new List<PendingSignal>();
-        private readonly List<MarkerInfo>    _markers = new List<MarkerInfo>();
-        private readonly object              _lock = new object();
 
         private struct MarkerInfo
         {
-            public DateTime    Time;
-            public double      Price;
-            public AlertLevel  Level;
+            public DateTime       Time;
+            public double         Price;
+            public AlertLevel     Level;
             public AbsorptionSide Side;
-            public string      Label;
+            public SignatureType  Type;
+            public string         Label;
         }
 
-        private string _zoneKey = "";
+        private readonly List<PendingConfirm> _pending = new();
+        private readonly List<MarkerInfo>     _markers = new();
+        private readonly object               _lock    = new();
+
+        private string _zoneKey              = "";
         private bool   _volumeAnalysisLoaded = false;
 
         // ════════════════════════════════════════════════════════════════════════
 
         public IOF_AbsorptionDetector() : base()
         {
-            Name        = "IOF Absorption Detector";
-            ShortName   = "IOF-ABS";
-            Description = "Flags the absorption exhaustion bar before the aggression flip. Detect-only — no orders.";
+            Name           = "IOF Absorption Detector";
+            ShortName      = "IOF-ABS";
+            Description    = "Flags the absorption/exhaustion tell bar before the aggression flip. Detect-only.";
             SeparateWindow = false;
-            AddLineSeries("IOF_ABS_marker", Color.Transparent, 1, LineStyle.Solid);
+            AddLineSeries("IOF_ABS_hidden", Color.Transparent, 1, LineStyle.Solid);
         }
 
         public bool IsRequirePriceLevelsCalculation => false;
 
-        public void VolumeAnalysisData_Loaded()
-        {
-            _volumeAnalysisLoaded = true;
-        }
+        public void VolumeAnalysisData_Loaded() => _volumeAnalysisLoaded = true;
 
         protected override void OnInit()
         {
@@ -161,7 +177,7 @@ namespace IOF_AbsorptionDetector
                 {
                     if (!File.Exists(LogFilePath))
                         File.AppendAllText(LogFilePath,
-                            "Time,Side,Stage,EffortBars,EffortDeltaSum,CurrentDelta,CurrentVolume,Price,NearZone,Fired\n");
+                            "Time,Side,SignatureType,Stage,EffortBars,EffortDeltas,CurDelta,CurVol,AvgPriorVol,Price,DivergenceHit,NearZone,Fired\n");
                 }
                 catch { }
             }
@@ -169,132 +185,213 @@ namespace IOF_AbsorptionDetector
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            if (this.HistoricalData == null || this.HistoricalData.Count < EffortLookback + FlipConfirmWindow + 2)
-                return;
+            if (!_volumeAnalysisLoaded) return;
+            if (this.HistoricalData == null) return;
 
-            // Only evaluate on a newly CLOSED bar — index 1 is the last fully
-            // closed bar relative to the forming bar at index 0. Firing here
-            // means the exhaustion bar has already closed (one-bar lag, by design).
+            int need = Math.Max(EffortLookback, NewExtremeLookback) + FlipConfirmWindow + 3;
+            if (this.HistoricalData.Count < need) return;
+
+            // Fire only on bar close — delta is final only at close.
+            // index 0 = forming bar, index 1 = last closed bar.
             if (args.Reason != UpdateReason.NewBar && args.Reason != UpdateReason.HistoricalBar)
                 return;
 
-            // Delta is only meaningful once cluster/volume-analysis data has
-            // loaded — before that, Total.Delta reads as 0 and would look like
-            // a fake exhaustion bar. Wait for the real data.
-            if (!_volumeAnalysisLoaded)
-                return;
+            var closed = this.HistoricalData[1] as HistoryItemBar;
+            if (closed == null) return;
 
-            var closedBar = this.HistoricalData[1] as HistoryItemBar;
-            if (closedBar == null) return;
-
-            EvaluateBar(closedBar, AbsorptionSide.Demand);
-            EvaluateBar(closedBar, AbsorptionSide.Supply);
-            AdvanceConfirmations(closedBar);
+            EvaluateBar(closed, AbsorptionSide.Demand);
+            EvaluateBar(closed, AbsorptionSide.Supply);
+            AdvanceConfirmations(closed);
         }
 
         // ── Core detection ───────────────────────────────────────────────────────
 
-        private double GetDelta(HistoryItemBar bar)
+        private double Delta(HistoryItemBar b)
         {
-            try { return bar?.VolumeAnalysisData?.Total?.Delta ?? 0.0; }
+            try { return b?.VolumeAnalysisData?.Total?.Delta ?? 0.0; }
             catch { return 0.0; }
         }
 
-        private double GetVolume(HistoryItemBar bar)
+        private double Vol(HistoryItemBar b)
         {
-            try { return bar?.Volume ?? 0.0; }
+            try { return b?.Volume ?? 0.0; }
             catch { return 0.0; }
         }
 
-        private void EvaluateBar(HistoryItemBar currentBar, AbsorptionSide side)
+        private void EvaluateBar(HistoryItemBar cur, AbsorptionSide side)
         {
-            // index 1 = currentBar (just closed). Scan bars [2 .. EffortLookback+1]
-            // for the effort phase that precedes it.
-            int heavyCount = 0;
-            double effortDeltaSum = 0;
+            // ── Step 1: effort phase ────────────────────────────────────────────
+            // Scan bars [2 .. EffortLookback+1] — bars BEFORE the current bar.
+            int    heavyCount     = 0;
+            var    effortDeltas   = new List<double>();
+            double avgPriorVol    = 0;
+            int    priorVolCount  = 0;
+
             for (int i = 2; i <= EffortLookback + 1; i++)
             {
                 var b = this.HistoricalData[i] as HistoryItemBar;
                 if (b == null) break;
-                double d = GetDelta(b);
-                effortDeltaSum += d;
+                double d = Delta(b);
                 bool heavy = side == AbsorptionSide.Demand
                     ? d <= -EffortDeltaThreshold
                     : d >= EffortDeltaThreshold;
-                if (heavy) heavyCount++;
+                if (heavy) { heavyCount++; effortDeltas.Add(d); }
+
+                avgPriorVol += Vol(b);
+                priorVolCount++;
             }
+            if (priorVolCount > 0) avgPriorVol /= priorVolCount;
+
             bool effortPresent = heavyCount >= EffortMinBars;
 
-            // New-extreme check over NewExtremeLookback bars (excluding current).
-            double extreme = side == AbsorptionSide.Demand ? double.MaxValue : double.MinValue;
-            for (int i = 1; i <= NewExtremeLookback; i++)
+            // ── Step 2: at the extreme ──────────────────────────────────────────
+            // Prior bars only [2 .. NewExtremeLookback+1]. Current bar must be
+            // at (or within 1 tick of) that prior extreme.
+            double tickSize  = 0.25;
+            try { tickSize = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25; } catch { }
+
+            double priorExtreme = side == AbsorptionSide.Demand ? double.MaxValue : double.MinValue;
+            for (int i = 2; i <= NewExtremeLookback + 1; i++)
             {
                 var b = this.HistoricalData[i] as HistoryItemBar;
                 if (b == null) break;
-                if (side == AbsorptionSide.Demand) extreme = Math.Min(extreme, b.Low);
-                else extreme = Math.Max(extreme, b.High);
+                if (side == AbsorptionSide.Demand) priorExtreme = Math.Min(priorExtreme, b.Low);
+                else                               priorExtreme = Math.Max(priorExtreme, b.High);
             }
 
-            var prevBar = this.HistoricalData[2] as HistoryItemBar;
-            bool atExtreme = side == AbsorptionSide.Demand
-                ? currentBar.Low <= extreme + 1e-9
-                : currentBar.High >= extreme - 1e-9;
+            bool atExtreme;
+            if (side == AbsorptionSide.Demand)
+                atExtreme = cur.Low <= priorExtreme + tickSize;          // at or marginally below prior low
+            else
+                atExtreme = cur.High >= priorExtreme - tickSize;         // at or marginally above prior high
 
-            bool rewardFailing = prevBar != null && (side == AbsorptionSide.Demand
-                ? !(currentBar.Low < prevBar.Low) || currentBar.Close > currentBar.Low
-                : !(currentBar.High > prevBar.High) || currentBar.Close < currentBar.High);
+            // ── Step 3: reward failing ──────────────────────────────────────────
+            var prev = this.HistoricalData[2] as HistoryItemBar;
+            bool rewardFailing;
+            if (side == AbsorptionSide.Demand)
+                rewardFailing = prev == null || cur.Low >= prev.Low - tickSize; // not making new lows
+            else
+                rewardFailing = prev == null || cur.High <= prev.High + tickSize; // not making new highs
 
-            double curDelta = GetDelta(currentBar);
-            double curVolume = GetVolume(currentBar);
+            // ── Step 4 + 5: signature type ──────────────────────────────────────
+            double curDelta = Delta(cur);
+            double curVol   = Vol(cur);
 
-            bool exhaustionDelta = Math.Abs(curDelta) <= ExhaustionDeltaMax
+            // ABSORPTION (primary): elevated volume + delta-close divergence.
+            //   Demand: heavy negative delta BUT close > open (green close = absorbed)
+            //   Supply: heavy positive delta BUT close < open (red close = absorbed)
+            // Also catches the simpler collapse form (abs delta ≤ ExhaustionDeltaMax)
+            // when DivergenceMode is true, the divergence form takes priority.
+            bool divergenceHit;
+            if (side == AbsorptionSide.Demand)
+                divergenceHit = DivergenceMode
+                    && curDelta <= -EffortDeltaThreshold    // heavy seller aggression
+                    && cur.Close > cur.Open;                // but bar closed UP — absorbed
+            else
+                divergenceHit = DivergenceMode
+                    && curDelta >= EffortDeltaThreshold     // heavy buyer aggression
+                    && cur.Close < cur.Open;                // but bar closed DOWN — absorbed
+
+            bool deltaCollapse = Math.Abs(curDelta) <= ExhaustionDeltaMax
                 && (side == AbsorptionSide.Demand ? curDelta <= 0 : curDelta >= 0);
-            bool volumeElevated = curVolume >= ExhaustionVolMin;
 
-            bool nearZone = CheckZoneProximity(side == AbsorptionSide.Demand ? currentBar.Low : currentBar.High);
-            bool zoneOk = !RequireZoneContext || nearZone;
+            bool absorptionSignal = (divergenceHit || deltaCollapse) && curVol >= ExhaustionVolMin;
 
-            bool fired = effortPresent && atExtreme && rewardFailing && exhaustionDelta && volumeElevated && zoneOk;
+            // EXHAUSTION (secondary): volume drying up into the extreme.
+            //   Volume < ExhaustionVolDrop × average of prior lookback bars.
+            //   Delta weakening (not necessarily flipping, just below threshold).
+            bool volDryingUp     = priorVolCount > 0 && curVol < ExhaustionVolDrop * avgPriorVol;
+            bool deltaWeakening  = side == AbsorptionSide.Demand
+                ? curDelta > -EffortDeltaThreshold           // below effort threshold = weakening
+                : curDelta <  EffortDeltaThreshold;
+            bool exhaustionSignal = volDryingUp && deltaWeakening;
 
-            if (LogAllCandidates && (effortPresent || fired))
+            // Near zone?
+            bool nearZone = CheckZoneProximity(side == AbsorptionSide.Demand ? cur.Low : cur.High);
+            bool zoneOk   = !RequireZoneContext || nearZone;
+
+            // ── Logging ─────────────────────────────────────────────────────────
+            if (LogAllCandidates && effortPresent)
             {
-                TryLog(currentBar.TimeLeft, side, fired ? "EXHAUSTION" : "candidate",
-                    heavyCount, effortDeltaSum, curDelta, curVolume,
-                    side == AbsorptionSide.Demand ? currentBar.Low : currentBar.High,
-                    nearZone, fired);
+                string effortStr = string.Join("|", effortDeltas.ConvertAll(d => d.ToString("F0")));
+                TryLog(cur.TimeLeft, side,
+                    absorptionSignal ? SignatureType.Absorption : SignatureType.Exhaustion,
+                    (absorptionSignal || exhaustionSignal) ? "EXHAUSTION" : "candidate",
+                    heavyCount, effortStr, curDelta, curVol, avgPriorVol,
+                    side == AbsorptionSide.Demand ? cur.Low : cur.High,
+                    divergenceHit, nearZone,
+                    (absorptionSignal || exhaustionSignal) && atExtreme && rewardFailing && zoneOk);
             }
 
-            if (effortPresent && atExtreme && !fired && EnableWatchAlert)
+            // ── Watch pre-alert ──────────────────────────────────────────────────
+            if (EnableWatchAlert && effortPresent && atExtreme && !absorptionSignal && !exhaustionSignal)
             {
-                // Watch: effort + at the extreme, but exhaustion hasn't printed yet.
-                AddMarker(currentBar.TimeLeft,
-                    side == AbsorptionSide.Demand ? currentBar.Low : currentBar.High,
-                    AlertLevel.Watch, side,
-                    $"WATCH: {side} effort {heavyCount}/{EffortLookback}, delta {curDelta:F0}");
+                double watchPrice = side == AbsorptionSide.Demand ? cur.Low : cur.High;
+                AddMarker(cur.TimeLeft, watchPrice, AlertLevel.Watch, side, SignatureType.Absorption,
+                    $"WATCH: {side} effort {heavyCount}/{EffortLookback} bars, delta {curDelta:F0}");
             }
 
-            if (fired)
+            // ── Fire EXHAUSTION alert for whichever signature fired ──────────────
+            if (effortPresent && atExtreme && rewardFailing && zoneOk)
             {
+                SignatureType sigType;
+                if (absorptionSignal)       sigType = SignatureType.Absorption;
+                else if (exhaustionSignal)  sigType = SignatureType.Exhaustion;
+                else                        return;
+
+                double alertPrice = side == AbsorptionSide.Demand ? cur.Low : cur.High;
+                string effortStr  = FormatRecentDeltas(side);
+                string zoneTag    = nearZone ? "" : "  [NO ZONE CONTEXT]";
+                string sigLabel   = sigType == SignatureType.Absorption
+                    ? (divergenceHit ? "ABSORPTION (divergence)" : "ABSORPTION (collapse)")
+                    : "EXHAUSTION (vol drying)";
+                string volInfo    = sigType == SignatureType.Absorption
+                    ? $"vol {curVol:F0} elevated"
+                    : $"vol {curVol:F0} ({curVol / avgPriorVol:P0} of avg)";
+
+                string label = $"{sigLabel}: effort {effortStr}, this bar {curDelta:F0}, {volInfo}{zoneTag}";
+
+                AddMarker(cur.TimeLeft, alertPrice, AlertLevel.Exhaustion, side, sigType, label);
+
                 lock (_lock)
-                {
-                    _pending.Add(new PendingSignal
-                    {
-                        Side = side,
-                        BarsSinceExhaustion = 0,
-                        Confirmed = false
-                    });
-                }
-
-                string label = $"EXHAUSTION: effort {FormatRecentDeltas(side)}, this bar {curDelta:F0}, vol {curVolume:F0}" +
-                                (RequireZoneContext ? "" : (nearZone ? "" : "  [NO ZONE CONTEXT]"));
-                AddMarker(currentBar.TimeLeft,
-                    side == AbsorptionSide.Demand ? currentBar.Low : currentBar.High,
-                    AlertLevel.Exhaustion, side, label);
+                    _pending.Add(new PendingConfirm { Side = side, Type = sigType, BarsSince = 0 });
 
                 if (SoundOnExhaustion) PlaySound(AlertLevel.Exhaustion);
                 FirePlatformAlert("ABSORPTION_EXHAUSTION", label);
             }
         }
+
+        private void AdvanceConfirmations(HistoryItemBar cur)
+        {
+            double curDelta = Delta(cur);
+            lock (_lock)
+            {
+                for (int i = _pending.Count - 1; i >= 0; i--)
+                {
+                    var p = _pending[i];
+                    p.BarsSince++;
+
+                    bool flip = p.Side == AbsorptionSide.Demand
+                        ? curDelta >= FlipDeltaThreshold
+                        : curDelta <= -FlipDeltaThreshold;
+
+                    if (flip)
+                    {
+                        string label = $"{p.Type.ToString().ToUpper()} CONFIRMED: flip delta {curDelta:F0} ({p.BarsSince} bar(s) after tell)";
+                        AddMarker(cur.TimeLeft, cur.Close, AlertLevel.Confirmed, p.Side, p.Type, label);
+                        if (SoundOnConfirmed) PlaySound(AlertLevel.Confirmed);
+                        FirePlatformAlert("ABSORPTION_CONFIRMED", label);
+                        _pending.RemoveAt(i);
+                    }
+                    else if (p.BarsSince >= FlipConfirmWindow)
+                    {
+                        _pending.RemoveAt(i); // window expired, no flip — drop silently
+                    }
+                }
+            }
+        }
+
+        // ── Helpers ──────────────────────────────────────────────────────────────
 
         private string FormatRecentDeltas(AbsorptionSide side)
         {
@@ -303,45 +400,11 @@ namespace IOF_AbsorptionDetector
             {
                 var b = this.HistoricalData[i] as HistoryItemBar;
                 if (b == null) continue;
-                double d = GetDelta(b);
+                double d = Delta(b);
                 bool heavy = side == AbsorptionSide.Demand ? d <= -EffortDeltaThreshold : d >= EffortDeltaThreshold;
                 if (heavy) parts.Add(d.ToString("F0"));
             }
             return parts.Count > 0 ? string.Join("/", parts) : "n/a";
-        }
-
-        private void AdvanceConfirmations(HistoryItemBar currentBar)
-        {
-            double curDelta = GetDelta(currentBar);
-            lock (_lock)
-            {
-                for (int i = _pending.Count - 1; i >= 0; i--)
-                {
-                    var p = _pending[i];
-                    if (p.Confirmed) { _pending.RemoveAt(i); continue; }
-
-                    p.BarsSinceExhaustion++;
-
-                    bool flip = p.Side == AbsorptionSide.Demand
-                        ? curDelta >= FlipDeltaThreshold
-                        : curDelta <= -FlipDeltaThreshold;
-
-                    if (flip)
-                    {
-                        p.Confirmed = true;
-                        string label = $"CONFIRMED: flip delta {curDelta:F0} ({p.BarsSinceExhaustion} bar(s) after exhaustion)";
-                        AddMarker(currentBar.TimeLeft, currentBar.Close, AlertLevel.Confirmed, p.Side, label);
-                        if (SoundOnConfirmed) PlaySound(AlertLevel.Confirmed);
-                        FirePlatformAlert("ABSORPTION_CONFIRMED", label);
-                        _pending.RemoveAt(i);
-                    }
-                    else if (p.BarsSinceExhaustion >= FlipConfirmWindow)
-                    {
-                        // Window expired without a flip — drop silently, no confirmation.
-                        _pending.RemoveAt(i);
-                    }
-                }
-            }
         }
 
         // ── Zone proximity (cross-DLL reflection into IOFZoneRegistry) ───────────
@@ -358,7 +421,7 @@ namespace IOF_AbsorptionDetector
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
                     if (asm.GetName().Name != "TradePhantoms_IOF_v2") continue;
-                    var type = asm.GetType("TradePhantoms.IOFZoneRegistry");
+                    var type   = asm.GetType("TradePhantoms.IOFZoneRegistry");
                     if (type == null) continue;
                     var method = type.GetMethod("IsNearZone", BindingFlags.Public | BindingFlags.Static);
                     if (method == null) continue;
@@ -366,10 +429,10 @@ namespace IOF_AbsorptionDetector
                 }
             }
             catch { }
-            return false; // zone indicator not loaded on this chart — caller decides what to do
+            return false;
         }
 
-        // ── Alerts ────────────────────────────────────────────────────────────────
+        // ── Platform alerts ───────────────────────────────────────────────────────
 
         private void PlaySound(AlertLevel level)
         {
@@ -391,23 +454,24 @@ namespace IOF_AbsorptionDetector
                 var core = Core.Instance;
                 if (core == null) return;
                 var alertsProp = core.GetType().GetProperty("Alerts");
-                var alerts = alertsProp?.GetValue(core);
+                var alerts     = alertsProp?.GetValue(core);
                 if (alerts == null) return;
-                var addAlert = alerts.GetType().GetMethod("AddAlert", new[] { typeof(string), typeof(string) });
+                var addAlert   = alerts.GetType().GetMethod("AddAlert", new[] { typeof(string), typeof(string) });
                 addAlert?.Invoke(alerts, new object[] { eventType, message });
             }
             catch { }
         }
 
-        private void TryLog(DateTime time, AbsorptionSide side, string stage, int heavyCount,
-            double effortDeltaSum, double curDelta, double curVolume, double price, bool nearZone, bool fired)
+        private void TryLog(DateTime time, AbsorptionSide side, SignatureType sigType, string stage,
+            int heavyCount, string effortDeltas, double curDelta, double curVol, double avgPriorVol,
+            double price, bool divHit, bool nearZone, bool fired)
         {
             try
             {
                 string line = string.Join(",",
-                    time.ToString("yyyy-MM-dd HH:mm:ss"), side, stage, heavyCount,
-                    effortDeltaSum.ToString("F0"), curDelta.ToString("F0"), curVolume.ToString("F0"),
-                    price.ToString("F2"), nearZone, fired);
+                    time.ToString("yyyy-MM-dd HH:mm:ss"), side, sigType, stage,
+                    heavyCount, effortDeltas, curDelta.ToString("F0"), curVol.ToString("F0"),
+                    avgPriorVol.ToString("F0"), price.ToString("F4"), divHit, nearZone, fired);
                 File.AppendAllText(LogFilePath, line + "\n");
             }
             catch { }
@@ -415,11 +479,16 @@ namespace IOF_AbsorptionDetector
 
         // ── Rendering ─────────────────────────────────────────────────────────────
 
-        private void AddMarker(DateTime time, double price, AlertLevel level, AbsorptionSide side, string label)
+        private void AddMarker(DateTime time, double price, AlertLevel level,
+            AbsorptionSide side, SignatureType type, string label)
         {
             lock (_lock)
             {
-                _markers.Add(new MarkerInfo { Time = time, Price = price, Level = level, Side = side, Label = label });
+                _markers.Add(new MarkerInfo
+                {
+                    Time = time, Price = price, Level = level,
+                    Side = side, Type = type, Label = label
+                });
                 if (_markers.Count > 500) _markers.RemoveAt(0);
             }
         }
@@ -433,11 +502,12 @@ namespace IOF_AbsorptionDetector
             lock (_lock) { snap = new List<MarkerInfo>(_markers); }
             if (snap.Count == 0) return;
 
-            var gr = args.Graphics;
-            var win = this.CurrentChart.MainWindow;
+            var gr   = args.Graphics;
+            var win  = this.CurrentChart.MainWindow;
             var rect = (Rectangle)win.ClientRectangle;
 
-            using var font = new Font("Consolas", 8f, FontStyle.Bold);
+            using var font      = new Font("Consolas", 8f, FontStyle.Bold);
+            using var smallFont = new Font("Consolas", 7f, FontStyle.Regular);
 
             foreach (var m in snap)
             {
@@ -449,25 +519,43 @@ namespace IOF_AbsorptionDetector
                 }
                 catch { continue; }
 
-                if (x < rect.Left - 50 || x > rect.Right + 50) continue;
+                if (x < rect.Left - 60 || x > rect.Right + 60) continue;
 
                 Color c = m.Level switch
                 {
-                    AlertLevel.Watch => WatchColor,
+                    AlertLevel.Watch      => WatchColor,
                     AlertLevel.Exhaustion => ExhaustionColor,
-                    AlertLevel.Confirmed => m.Side == AbsorptionSide.Demand ? ConfirmedLongColor : ConfirmedShortColor,
-                    _ => Color.Gray
+                    AlertLevel.Confirmed  => m.Side == AbsorptionSide.Demand ? ConfirmedLongColor : ConfirmedShortColor,
+                    _                     => Color.Gray
                 };
 
-                int markerSize = m.Level == AlertLevel.Exhaustion ? 7 : 5;
+                // Arrow tip offset: below bar for demand, above for supply
+                bool isDemand  = m.Side == AbsorptionSide.Demand;
+                int  arrowSize = m.Level == AlertLevel.Exhaustion ? 9 : m.Level == AlertLevel.Confirmed ? 8 : 5;
+                int  offsetY   = isDemand ? arrowSize + 4 : -(arrowSize + 4);
+
                 using var brush = new SolidBrush(c);
-                int dirY = m.Side == AbsorptionSide.Demand ? 12 : -12;
-                gr.FillEllipse(brush, x - markerSize / 2, y + dirY - markerSize / 2, markerSize, markerSize);
+                using var pen   = new Pen(c, 1.5f);
+
+                // Draw triangle (arrow)
+                Point tip  = new Point(x, y + offsetY);
+                Point left, right;
+                if (isDemand) // pointing up (toward bar)
+                {
+                    left  = new Point(x - arrowSize / 2, y + offsetY + arrowSize);
+                    right = new Point(x + arrowSize / 2, y + offsetY + arrowSize);
+                }
+                else           // pointing down
+                {
+                    left  = new Point(x - arrowSize / 2, y + offsetY - arrowSize);
+                    right = new Point(x + arrowSize / 2, y + offsetY - arrowSize);
+                }
+                gr.FillPolygon(brush, new[] { tip, left, right });
 
                 if (m.Level != AlertLevel.Watch)
                 {
-                    var textY = y + dirY + (m.Side == AbsorptionSide.Demand ? 6 : -18);
-                    gr.DrawString(m.Label, font, brush, x + 6, textY);
+                    int textY = isDemand ? y + offsetY + arrowSize + 2 : y + offsetY - arrowSize - 13;
+                    gr.DrawString(m.Label, smallFont, brush, x - arrowSize, textY);
                 }
             }
         }
