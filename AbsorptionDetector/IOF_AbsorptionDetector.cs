@@ -1,21 +1,26 @@
 // IOF_AbsorptionDetector.cs — Absorption / Exhaustion → Aggression-Flip detector
-//                             with Phantoms daily-bias layer (EMA 20/50/200 + VWAP)
 //
-// Bias layer (Phantoms methodology):
-//   STRONG LONG  — close > EMA20 > EMA50 > EMA200 AND close > VWAP  (all 5 aligned)
-//   LONG         — close above EMA50 and EMA200, majority aligned
-//   NEUTRAL      — mixed signals
-//   SHORT        — close below EMA50 and EMA200, majority aligned
-//   STRONG SHORT — close < EMA20 < EMA50 < EMA200 AND close < VWAP  (all 5 aligned)
+// Bias layer (Phantoms methodology — EMA 20/50/200 + session VWAP):
+//   STRONG LONG  — close > EMA20 > EMA50 > EMA200 AND close > VWAP
+//   LONG         — majority above key EMAs
+//   NEUTRAL      — mixed
+//   SHORT / STRONG SHORT — mirror
+//   BUY NOW fires only on LONG/STRONG LONG. SELL NOW on SHORT/STRONG SHORT.
 //
-// Signal gating:
-//   BUY NOW  fires only when bias = LONG or STRONG LONG
-//   SELL NOW fires only when bias = SHORT or STRONG SHORT
-//   NEUTRAL  fires with "[NEUTRAL BIAS]" tag (suppressed if BiasRequireAligned = true)
-//
-// Absorption signatures detected:
+// Detection — two distinct signatures (labeled separately):
 //   ABSORPTION — elevated volume + delta-close divergence (heavy delta, opposing close)
-//   EXHAUSTION — volume drying up into the extreme (move running out of gas)
+//   EXHAUSTION — volume drying up into the extreme
+//
+// Signal strength score (★ per confirming factor, max ★★★★):
+//   ★ CVD divergence confirmed (multi-bar cumulative delta diverging from price)
+//   ★ Near an active IOF zone
+//   ★ Bias fully aligned (not neutral)
+//   ★ Delta-close divergence form (strongest absorption pattern)
+//   First touch of price level adds +1 to score (virgin areas highest probability)
+//
+// CVD divergence (from volume spread analysis):
+//   CVD making lower lows (sellers accumulating) while price holds = passive buyers absorbing.
+//   Tracked over CvdLookback bars as a multi-bar confirmation layer.
 //
 // Detect-only. No orders. Trader decides. Gate panel executes.
 
@@ -61,6 +66,14 @@ namespace IOF_AbsorptionDetector
         [InputParameter("Show bias status box", 13)]
         public bool ShowBiasBox = true;
 
+        // ── CVD divergence ───────────────────────────────────────────────────────
+
+        [InputParameter("CVD lookback (bars)", 14, 2, 50, 1, 0)]
+        public int CvdLookback = 5;
+
+        [InputParameter("Require CVD divergence to fire", 15)]
+        public bool RequireCvdDivergence = false;
+
         // ── Detection parameters ─────────────────────────────────────────────────
 
         [InputParameter("Effort lookback (bars)", 20, 2, 50, 1, 0)]
@@ -99,6 +112,11 @@ namespace IOF_AbsorptionDetector
         [InputParameter("Require zone context", 75)]
         public bool RequireZoneContext = false;
 
+        // ── Touch tracking ────────────────────────────────────────────────────────
+
+        [InputParameter("Touch tracking window (ticks)", 76, 1, 100, 1, 0)]
+        public int TouchTrackingTicks = 10;
+
         // ── Alerts ────────────────────────────────────────────────────────────────
 
         [InputParameter("Enable Watch pre-alert", 80)]
@@ -134,11 +152,15 @@ namespace IOF_AbsorptionDetector
             public SignatureType  Type;
             public string         Label;
             public BiasState      Bias;
+            public int            Score;   // 0-4 stars
         }
 
         private readonly List<PendingConfirm> _pending = new();
         private readonly List<MarkerInfo>     _markers = new();
         private readonly object               _lock    = new();
+
+        // Level touch tracking: price level (rounded to TouchTrackingTicks) → touch count
+        private readonly Dictionary<long, int> _touchCounts = new();
 
         // EMA state
         private double _ema20 = 0, _ema50 = 0, _ema200 = 0;
@@ -164,10 +186,10 @@ namespace IOF_AbsorptionDetector
         public IOF_AbsorptionDetector() : base()
         {
             Name           = "IOF Absorption Detector";
-            Description    = "Absorption/exhaustion signal with Phantoms EMA+VWAP bias filter. Detect-only.";
+            Description    = "Absorption/exhaustion + CVD divergence + bias filter + strength scoring. Detect-only.";
             SeparateWindow = false;
 
-            AddLineSeries("EMA 20",  Color.FromArgb(255, 0,   220, 255), 1, LineStyle.Solid);
+            AddLineSeries("EMA 20",  Color.FromArgb(255,   0, 220, 255), 1, LineStyle.Solid);
             AddLineSeries("EMA 50",  Color.FromArgb(255, 255, 165,   0), 1, LineStyle.Solid);
             AddLineSeries("EMA 200", Color.FromArgb(255, 255,  60,  60), 2, LineStyle.Solid);
             AddLineSeries("VWAP",    Color.FromArgb(255, 255, 255,   0), 1, LineStyle.Dash);
@@ -179,6 +201,7 @@ namespace IOF_AbsorptionDetector
         protected override void OnInit()
         {
             lock (_lock) { _pending.Clear(); _markers.Clear(); }
+            _touchCounts.Clear();
             _volumeAnalysisLoaded = false;
             _ema20 = _ema50 = _ema200 = 0;
             _ema20Init = _ema50Init = _ema200Init = false;
@@ -201,7 +224,7 @@ namespace IOF_AbsorptionDetector
                 {
                     if (!File.Exists(LogFilePath))
                         File.AppendAllText(LogFilePath,
-                            "Time,Side,SignatureType,Stage,Bias,EffortBars,CurDelta,CurVol,AvgPriorVol,Price,DivHit,NearZone,Fired\n");
+                            "Time,Side,SigType,Stage,Bias,Score,EffortBars,CurDelta,CurVol,CvdDiv,NearZone,Fired\n");
                 }
                 catch { }
             }
@@ -214,20 +237,17 @@ namespace IOF_AbsorptionDetector
             var bar = this.HistoricalData[0] as HistoryItemBar;
             if (bar == null) return;
 
-            // ── Update EMA and VWAP on every tick (drives the line series) ────────
-            UpdateBiasIndicators(bar, args.Reason == UpdateReason.NewBar || args.Reason == UpdateReason.HistoricalBar);
+            bool isClose = args.Reason == UpdateReason.NewBar || args.Reason == UpdateReason.HistoricalBar;
+            UpdateBiasIndicators(bar, isClose);
 
-            // Set line series values (hide lines if user disabled them)
-            SetValue(_ema20Init  && ShowEmaLines  ? _ema20       : double.NaN, S_EMA20);
-            SetValue(_ema50Init  && ShowEmaLines  ? _ema50       : double.NaN, S_EMA50);
-            SetValue(_ema200Init && ShowEmaLines  ? _ema200      : double.NaN, S_EMA200);
+            SetValue(_ema20Init  && ShowEmaLines  ? _ema20        : double.NaN, S_EMA20);
+            SetValue(_ema50Init  && ShowEmaLines  ? _ema50        : double.NaN, S_EMA50);
+            SetValue(_ema200Init && ShowEmaLines  ? _ema200       : double.NaN, S_EMA200);
             SetValue(_vwapCumVol > 0 && ShowVwapLine ? _currentVwap : double.NaN, S_VWAP);
 
-            // ── Detection runs only on bar close ──────────────────────────────────
-            if (!_volumeAnalysisLoaded) return;
-            if (args.Reason != UpdateReason.NewBar && args.Reason != UpdateReason.HistoricalBar) return;
+            if (!_volumeAnalysisLoaded || !isClose) return;
 
-            int need = Math.Max(EffortLookback, NewExtremeLookback) + FlipConfirmWindow + 3;
+            int need = Math.Max(Math.Max(EffortLookback, NewExtremeLookback), CvdLookback) + FlipConfirmWindow + 3;
             if (this.HistoricalData.Count < need) return;
 
             var closed = this.HistoricalData[1] as HistoryItemBar;
@@ -244,25 +264,23 @@ namespace IOF_AbsorptionDetector
         {
             double close = bar.Close;
 
-            // EMA updates only on bar close to avoid intrabar drift on the lines
             if (isBarClose)
             {
                 _barCount++;
 
-                double alpha20  = 2.0 / (EmaPeriod20  + 1);
-                double alpha50  = 2.0 / (EmaPeriod50  + 1);
-                double alpha200 = 2.0 / (EmaPeriod200 + 1);
+                double a20  = 2.0 / (EmaPeriod20  + 1);
+                double a50  = 2.0 / (EmaPeriod50  + 1);
+                double a200 = 2.0 / (EmaPeriod200 + 1);
 
                 if (!_ema20Init)  { _ema20  = close; _ema20Init  = _barCount >= EmaPeriod20;  }
-                else              { _ema20  = alpha20  * close + (1 - alpha20)  * _ema20;  }
+                else              { _ema20  = a20  * close + (1 - a20)  * _ema20;  }
 
                 if (!_ema50Init)  { _ema50  = close; _ema50Init  = _barCount >= EmaPeriod50;  }
-                else              { _ema50  = alpha50  * close + (1 - alpha50)  * _ema50;  }
+                else              { _ema50  = a50  * close + (1 - a50)  * _ema50;  }
 
                 if (!_ema200Init) { _ema200 = close; _ema200Init = _barCount >= EmaPeriod200; }
-                else              { _ema200 = alpha200 * close + (1 - alpha200) * _ema200; }
+                else              { _ema200 = a200 * close + (1 - a200) * _ema200; }
 
-                // VWAP: reset on new session day
                 DateTime barDate = bar.TimeLeft.Date;
                 if (barDate != _vwapDate)
                 {
@@ -284,45 +302,88 @@ namespace IOF_AbsorptionDetector
             if (!_ema200Init) return BiasState.Neutral;
 
             int bull = 0;
-            if (_ema20Init  && close  > _ema20)  bull++;   // price above fast EMA
-            if (_ema20Init  && _ema50Init  && _ema20  > _ema50)  bull++;  // EMA20 > EMA50
-            if (_ema50Init  && _ema200Init && _ema50  > _ema200) bull++;  // EMA50 > EMA200
-            if (close > _ema200)                              bull++;   // price above slow EMA
-            if (_vwapCumVol > 0 && close > _currentVwap)    bull++;   // above VWAP
+            if (_ema20Init  && close > _ema20)                      bull++;
+            if (_ema20Init  && _ema50Init  && _ema20  > _ema50)     bull++;
+            if (_ema50Init  && _ema200Init && _ema50  > _ema200)    bull++;
+            if (close > _ema200)                                     bull++;
+            if (_vwapCumVol > 0 && close > _currentVwap)            bull++;
 
             return bull switch
             {
-                5    => BiasState.StrongLong,
-                4    => BiasState.Long,
-                3    => BiasState.Neutral,
-                2    => BiasState.Short,
-                1    => BiasState.StrongShort,
-                _    => BiasState.StrongShort
+                5 => BiasState.StrongLong,
+                4 => BiasState.Long,
+                3 => BiasState.Neutral,
+                2 => BiasState.Short,
+                _ => BiasState.StrongShort
             };
         }
 
         private bool BiasAllows(AbsorptionSide side)
         {
             if (!BiasFilterEnabled) return true;
-
             if (side == AbsorptionSide.Demand)
-            {
-                if (_currentBias == BiasState.StrongLong || _currentBias == BiasState.Long) return true;
-                if (_currentBias == BiasState.Neutral && !BiasRequireAligned) return true;
-                return false;
-            }
+                return _currentBias == BiasState.StrongLong || _currentBias == BiasState.Long
+                    || (_currentBias == BiasState.Neutral && !BiasRequireAligned);
             else
-            {
-                if (_currentBias == BiasState.StrongShort || _currentBias == BiasState.Short) return true;
-                if (_currentBias == BiasState.Neutral && !BiasRequireAligned) return true;
-                return false;
-            }
+                return _currentBias == BiasState.StrongShort || _currentBias == BiasState.Short
+                    || (_currentBias == BiasState.Neutral && !BiasRequireAligned);
         }
 
-        private string BiasTag()
+        // ── Touch tracking ───────────────────────────────────────────────────────
+
+        private long LevelKey(double price)
         {
-            if (!BiasFilterEnabled) return "";
-            return _currentBias == BiasState.Neutral ? "  [NEUTRAL BIAS]" : "";
+            double tickSize = 0.25;
+            try { tickSize = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25; } catch { }
+            return (long)Math.Round(price / (TouchTrackingTicks * tickSize));
+        }
+
+        private int GetAndIncrementTouches(double price)
+        {
+            long key = LevelKey(price);
+            _touchCounts.TryGetValue(key, out int count);
+            _touchCounts[key] = count + 1;
+            return count; // return BEFORE increment — 0 = first touch (virgin)
+        }
+
+        // ── CVD divergence ────────────────────────────────────────────────────────
+
+        private bool CheckCvdDivergence(HistoryItemBar cur, AbsorptionSide side)
+        {
+            double tickSize = 0.25;
+            try { tickSize = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25; } catch { }
+
+            double cvdSum = 0;
+            for (int i = 1; i <= CvdLookback; i++)
+            {
+                var b = this.HistoricalData[i] as HistoryItemBar;
+                if (b == null) break;
+                cvdSum += Delta(b);
+            }
+
+            var oldest = this.HistoricalData[CvdLookback] as HistoryItemBar;
+            if (oldest == null) return false;
+
+            double priceChange = cur.Close - oldest.Close;
+
+            // Demand: CVD trending negative (sellers aggressive) but price not falling = divergence
+            // Supply: CVD trending positive (buyers aggressive) but price not rising = divergence
+            return side == AbsorptionSide.Demand
+                ? cvdSum < -EffortDeltaThreshold && priceChange >= -tickSize
+                : cvdSum >  EffortDeltaThreshold && priceChange <=  tickSize;
+        }
+
+        // ── Signal strength score (0-4) ──────────────────────────────────────────
+
+        private int CalcScore(bool cvdDivergence, bool nearZone, bool divergenceHit, int priorTouches)
+        {
+            int score = 0;
+            if (cvdDivergence)                                                   score++; // ★ CVD divergence
+            if (nearZone)                                                        score++; // ★ Near zone
+            if (BiasFilterEnabled && _currentBias != BiasState.Neutral)         score++; // ★ Bias fully aligned
+            if (divergenceHit)                                                   score++; // ★ Divergence form
+            if (priorTouches == 0) score = Math.Min(4, score + 1);                      // ★ Virgin level bonus
+            return Math.Min(score, 4);
         }
 
         // ── Core detection ───────────────────────────────────────────────────────
@@ -343,7 +404,7 @@ namespace IOF_AbsorptionDetector
         {
             if (!BiasAllows(side)) return;
 
-            // Step 1: effort phase (bars BEFORE current: indices [2..EffortLookback+1])
+            // Step 1: effort phase
             int    heavyCount    = 0;
             var    effortDeltas  = new List<double>();
             double avgPriorVol   = 0;
@@ -364,7 +425,7 @@ namespace IOF_AbsorptionDetector
             if (priorVolCount > 0) avgPriorVol /= priorVolCount;
             bool effortPresent = heavyCount >= EffortMinBars;
 
-            // Step 2: at the extreme (prior bars only — fixes the always-true bug)
+            // Step 2: at the extreme (prior bars only)
             double tickSize = 0.25;
             try { tickSize = this.Symbol?.TickSize > 0 ? this.Symbol.TickSize : 0.25; } catch { }
 
@@ -395,9 +456,8 @@ namespace IOF_AbsorptionDetector
                 ? DivergenceMode && curDelta <= -EffortDeltaThreshold && cur.Close > cur.Open
                 : DivergenceMode && curDelta >=  EffortDeltaThreshold && cur.Close < cur.Open;
 
-            bool deltaCollapse = Math.Abs(curDelta) <= ExhaustionDeltaMax
+            bool deltaCollapse    = Math.Abs(curDelta) <= ExhaustionDeltaMax
                 && (side == AbsorptionSide.Demand ? curDelta <= 0 : curDelta >= 0);
-
             bool absorptionSignal = (divergenceHit || deltaCollapse) && curVol >= ExhaustionVolMin;
             bool volDryingUp      = priorVolCount > 0 && curVol < ExhaustionVolDrop * avgPriorVol;
             bool deltaWeakening   = side == AbsorptionSide.Demand
@@ -405,53 +465,58 @@ namespace IOF_AbsorptionDetector
                 : curDelta <  EffortDeltaThreshold;
             bool exhaustionSignal = volDryingUp && deltaWeakening;
 
-            bool nearZone = CheckZoneProximity(side == AbsorptionSide.Demand ? cur.Low : cur.High);
+            // CVD divergence
+            bool cvdDiv = CheckCvdDivergence(cur, side);
+            if (RequireCvdDivergence && !cvdDiv) return;
+
+            // Zone + touch
+            double alertPrice = side == AbsorptionSide.Demand ? cur.Low : cur.High;
+            bool nearZone = CheckZoneProximity(alertPrice);
             bool zoneOk   = !RequireZoneContext || nearZone;
 
             if (LogAllCandidates && effortPresent)
             {
-                string eff = string.Join("|", effortDeltas.ConvertAll(d => d.ToString("F0")));
                 TryLog(cur.TimeLeft, side,
                     absorptionSignal ? SignatureType.Absorption : SignatureType.Exhaustion,
                     (absorptionSignal || exhaustionSignal) ? "EXHAUSTION" : "candidate",
-                    _currentBias, heavyCount, eff, curDelta, curVol, avgPriorVol,
-                    side == AbsorptionSide.Demand ? cur.Low : cur.High,
-                    divergenceHit, nearZone,
+                    _currentBias, 0, heavyCount, curDelta, curVol, cvdDiv, nearZone,
                     (absorptionSignal || exhaustionSignal) && atExtreme && rewardFailing && zoneOk);
             }
 
             if (EnableWatchAlert && effortPresent && atExtreme && !absorptionSignal && !exhaustionSignal)
             {
-                double wp = side == AbsorptionSide.Demand ? cur.Low : cur.High;
-                AddMarker(cur.TimeLeft, wp, AlertLevel.Watch, side, SignatureType.Absorption,
-                    $"WATCH: {side} effort {heavyCount}/{EffortLookback} bars, delta {curDelta:F0}",
-                    _currentBias);
+                AddMarker(cur.TimeLeft, alertPrice, AlertLevel.Watch, side, SignatureType.Absorption,
+                    $"WATCH: {side} effort {heavyCount}/{EffortLookback} bars  delta {curDelta:F0}",
+                    _currentBias, 0);
             }
 
-            if (effortPresent && atExtreme && rewardFailing && zoneOk)
-            {
-                SignatureType sigType;
-                if (absorptionSignal)      sigType = SignatureType.Absorption;
-                else if (exhaustionSignal) sigType = SignatureType.Exhaustion;
-                else                       return;
+            if (!effortPresent || !atExtreme || !rewardFailing || !zoneOk) return;
 
-                double alertPrice = side == AbsorptionSide.Demand ? cur.Low : cur.High;
-                string sigLabel   = sigType == SignatureType.Absorption
-                    ? (divergenceHit ? "ABSORPTION (divergence)" : "ABSORPTION (collapse)")
-                    : "EXHAUSTION (vol drying)";
-                string volInfo    = sigType == SignatureType.Absorption
-                    ? $"vol {curVol:F0} elevated"
-                    : $"vol {curVol:F0} ({curVol / avgPriorVol:P0} of avg)";
-                string biasStr    = BiasLabel(_currentBias);
-                string zoneTag    = nearZone ? "" : "  [NO ZONE]";
+            SignatureType sigType;
+            if (absorptionSignal)      sigType = SignatureType.Absorption;
+            else if (exhaustionSignal) sigType = SignatureType.Exhaustion;
+            else                       return;
 
-                string label = $"{sigLabel}: effort {FormatRecentDeltas(side)}, bar {curDelta:F0}, {volInfo}  bias:{biasStr}{zoneTag}{BiasTag()}";
+            int priorTouches = GetAndIncrementTouches(alertPrice);
+            int score = CalcScore(cvdDiv, nearZone, divergenceHit, priorTouches);
 
-                AddMarker(cur.TimeLeft, alertPrice, AlertLevel.Exhaustion, side, sigType, label, _currentBias);
-                lock (_lock) _pending.Add(new PendingConfirm { Side = side, Type = sigType, BarsSince = 0 });
-                if (SoundOnExhaustion) PlaySound(AlertLevel.Exhaustion);
-                FirePlatformAlert("ABSORPTION_EXHAUSTION", label);
-            }
+            string sigLabel  = sigType == SignatureType.Absorption
+                ? (divergenceHit ? "ABSORPTION (divergence)" : "ABSORPTION (collapse)")
+                : "EXHAUSTION (vol drying)";
+            string volInfo   = sigType == SignatureType.Absorption
+                ? $"vol {curVol:F0} elevated"
+                : $"vol {curVol:F0} ({curVol / avgPriorVol:P0} of avg)";
+            string cvdTag    = cvdDiv ? "  CVD✓" : "";
+            string touchTag  = priorTouches == 0 ? "  [VIRGIN]" : $"  [touch #{priorTouches + 1}]";
+            string biasTag   = _currentBias == BiasState.Neutral ? "  [NEUTRAL BIAS]" : "";
+            string zoneTag   = nearZone ? "" : "  [NO ZONE]";
+
+            string label = $"{sigLabel}: effort {FormatRecentDeltas(side)}, bar {curDelta:F0}, {volInfo}{cvdTag}{touchTag}{biasTag}{zoneTag}";
+
+            AddMarker(cur.TimeLeft, alertPrice, AlertLevel.Exhaustion, side, sigType, label, _currentBias, score);
+            lock (_lock) _pending.Add(new PendingConfirm { Side = side, Type = sigType, BarsSince = 0 });
+            if (SoundOnExhaustion) PlaySound(AlertLevel.Exhaustion, score);
+            FirePlatformAlert("ABSORPTION_EXHAUSTION", label);
         }
 
         private void AdvanceConfirmations(HistoryItemBar cur)
@@ -470,9 +535,9 @@ namespace IOF_AbsorptionDetector
 
                     if (flip)
                     {
-                        string label = $"{p.Type.ToString().ToUpper()} CONFIRMED: flip {curDelta:F0} ({p.BarsSince} bar(s) after tell)";
-                        AddMarker(cur.TimeLeft, cur.Close, AlertLevel.Confirmed, p.Side, p.Type, label, _currentBias);
-                        if (SoundOnConfirmed) PlaySound(AlertLevel.Confirmed);
+                        string label = $"{p.Type.ToString().ToUpper()} CONFIRMED: flip {curDelta:F0} ({p.BarsSince} bar(s))";
+                        AddMarker(cur.TimeLeft, cur.Close, AlertLevel.Confirmed, p.Side, p.Type, label, _currentBias, 0);
+                        if (SoundOnConfirmed) PlaySound(AlertLevel.Confirmed, 0);
                         FirePlatformAlert("ABSORPTION_CONFIRMED", label);
                         _pending.RemoveAt(i);
                     }
@@ -510,6 +575,9 @@ namespace IOF_AbsorptionDetector
             _                     => "?"
         };
 
+        private static string Stars(int score) =>
+            new string('★', score) + new string('☆', 4 - score);
+
         // ── Zone proximity ───────────────────────────────────────────────────────
 
         private bool CheckZoneProximity(double price)
@@ -534,16 +602,21 @@ namespace IOF_AbsorptionDetector
             return false;
         }
 
-        // ── Platform alerts ───────────────────────────────────────────────────────
+        // ── Platform alerts / sound ───────────────────────────────────────────────
 
-        private void PlaySound(AlertLevel level)
+        private void PlaySound(AlertLevel level, int score)
         {
             try
             {
-                switch (level)
+                if (level == AlertLevel.Exhaustion)
                 {
-                    case AlertLevel.Exhaustion: Console.Beep(1200, 200); break;
-                    case AlertLevel.Confirmed:  Console.Beep(1600, 150); Console.Beep(1900, 150); break;
+                    int freq = 1000 + score * 100; // higher score = higher pitch
+                    Console.Beep(freq, 200);
+                }
+                else if (level == AlertLevel.Confirmed)
+                {
+                    Console.Beep(1600, 150);
+                    Console.Beep(1900, 150);
                 }
             }
             catch { }
@@ -565,15 +638,15 @@ namespace IOF_AbsorptionDetector
         }
 
         private void TryLog(DateTime time, AbsorptionSide side, SignatureType sigType, string stage,
-            BiasState bias, int heavyCount, string effortDeltas, double curDelta, double curVol,
-            double avgPriorVol, double price, bool divHit, bool nearZone, bool fired)
+            BiasState bias, int score, int heavyCount, double curDelta, double curVol,
+            bool cvdDiv, bool nearZone, bool fired)
         {
             try
             {
                 string line = string.Join(",",
-                    time.ToString("yyyy-MM-dd HH:mm:ss"), side, sigType, stage, bias,
-                    heavyCount, effortDeltas, curDelta.ToString("F0"), curVol.ToString("F0"),
-                    avgPriorVol.ToString("F0"), price.ToString("F4"), divHit, nearZone, fired);
+                    time.ToString("yyyy-MM-dd HH:mm:ss"), side, sigType, stage, bias, score,
+                    heavyCount, curDelta.ToString("F0"), curVol.ToString("F0"),
+                    cvdDiv, nearZone, fired);
                 File.AppendAllText(LogFilePath, line + "\n");
             }
             catch { }
@@ -582,14 +655,14 @@ namespace IOF_AbsorptionDetector
         // ── Rendering ─────────────────────────────────────────────────────────────
 
         private void AddMarker(DateTime time, double price, AlertLevel level,
-            AbsorptionSide side, SignatureType type, string label, BiasState bias)
+            AbsorptionSide side, SignatureType type, string label, BiasState bias, int score)
         {
             lock (_lock)
             {
                 _markers.Add(new MarkerInfo
                 {
                     Time = time, Price = price, Level = level,
-                    Side = side, Type = type, Label = label, Bias = bias
+                    Side = side, Type = type, Label = label, Bias = bias, Score = score
                 });
                 if (_markers.Count > 500) _markers.RemoveAt(0);
             }
@@ -604,16 +677,14 @@ namespace IOF_AbsorptionDetector
             var win  = this.CurrentChart.MainWindow;
             var rect = (Rectangle)win.ClientRectangle;
 
-            // ── Bias status box (top-left) ────────────────────────────────────────
-            if (ShowBiasBox)
-                DrawBiasBox(gr, rect);
+            if (ShowBiasBox) DrawBiasBox(gr, rect);
 
-            // ── Signal markers ────────────────────────────────────────────────────
             List<MarkerInfo> snap;
             lock (_lock) { snap = new List<MarkerInfo>(_markers); }
             if (snap.Count == 0) return;
 
             using var labelFont  = new Font("Arial",    11f, FontStyle.Bold);
+            using var starsFont  = new Font("Arial",     9f, FontStyle.Bold);
             using var detailFont = new Font("Consolas",  7f, FontStyle.Regular);
 
             foreach (var m in snap)
@@ -630,13 +701,14 @@ namespace IOF_AbsorptionDetector
 
                 bool isDemand = m.Side == AbsorptionSide.Demand;
 
-                Color bubbleColor;
-                if (m.Level == AlertLevel.Watch)
-                    bubbleColor = isDemand ? Color.FromArgb(100, 0, 200, 80) : Color.FromArgb(100, 220, 40, 40);
-                else
-                    bubbleColor = isDemand ? Color.FromArgb(220, 0, 210, 80) : Color.FromArgb(220, 230, 30, 30);
+                Color bubbleColor = m.Level == AlertLevel.Watch
+                    ? (isDemand ? Color.FromArgb(100, 0, 200, 80) : Color.FromArgb(100, 220, 40, 40))
+                    : (isDemand ? Color.FromArgb(220, 0, 210, 80) : Color.FromArgb(220, 230, 30, 30));
 
-                int radius  = m.Level == AlertLevel.Exhaustion ? 12 : m.Level == AlertLevel.Confirmed ? 10 : 6;
+                // Bubble size scales with score on Exhaustion markers
+                int radius = m.Level == AlertLevel.Exhaustion ? 10 + m.Score
+                           : m.Level == AlertLevel.Confirmed  ? 10
+                           : 6;
                 int gap     = radius + 6;
                 int centerY = isDemand ? y + gap : y - gap;
 
@@ -649,6 +721,7 @@ namespace IOF_AbsorptionDetector
 
                 if (m.Level == AlertLevel.Exhaustion || m.Level == AlertLevel.Confirmed)
                 {
+                    // BUY NOW / SELL NOW
                     string callout = isDemand ? "BUY NOW" : "SELL NOW";
                     var    sz      = gr.MeasureString(callout, labelFont);
                     int    textX   = x - (int)(sz.Width / 2);
@@ -662,11 +735,29 @@ namespace IOF_AbsorptionDetector
 
                     if (m.Level == AlertLevel.Exhaustion)
                     {
-                        var detailSz = gr.MeasureString(m.Label, detailFont);
-                        int detailX  = x - (int)(detailSz.Width / 2);
-                        int detailY  = isDemand
-                            ? textY + (int)sz.Height + 1
-                            : textY - (int)detailSz.Height - 1;
+                        // Stars rating below BUY/SELL NOW
+                        string starsStr = Stars(m.Score);
+                        var    starsSz  = gr.MeasureString(starsStr, starsFont);
+                        int    starsX   = x - (int)(starsSz.Width / 2);
+                        int    starsY   = isDemand
+                            ? textY + (int)sz.Height
+                            : textY - (int)starsSz.Height;
+
+                        // Star color: gold for high score, dimmer for low
+                        Color starColor = m.Score >= 3
+                            ? Color.FromArgb(255, 255, 215, 0)
+                            : m.Score == 2
+                                ? Color.FromArgb(255, 200, 160, 0)
+                                : Color.FromArgb(180, 150, 150, 150);
+                        using var starBrush = new SolidBrush(starColor);
+                        gr.DrawString(starsStr, starsFont, starBrush, starsX, starsY);
+
+                        // Detail line
+                        var  detailSz = gr.MeasureString(m.Label, detailFont);
+                        int  detailX  = x - (int)(detailSz.Width / 2);
+                        int  detailY  = isDemand
+                            ? starsY + (int)starsSz.Height + 1
+                            : starsY - (int)detailFont.GetHeight(gr) - 1;
                         using var detailBrush = new SolidBrush(Color.FromArgb(200, 220, 220, 220));
                         gr.DrawString(m.Label, detailFont, detailBrush, detailX, detailY);
                     }
@@ -677,17 +768,15 @@ namespace IOF_AbsorptionDetector
         private void DrawBiasBox(Graphics gr, Rectangle rect)
         {
             string biasText = BiasLabel(_currentBias);
-
             Color biasColor = _currentBias switch
             {
-                BiasState.StrongLong  => Color.FromArgb(255, 0,  210, 80),
-                BiasState.Long        => Color.FromArgb(255, 0,  170, 60),
-                BiasState.Neutral     => Color.FromArgb(255, 160,160,160),
-                BiasState.Short       => Color.FromArgb(255, 210, 50, 50),
-                BiasState.StrongShort => Color.FromArgb(255, 230, 20, 20),
+                BiasState.StrongLong  => Color.FromArgb(255, 0,  210,  80),
+                BiasState.Long        => Color.FromArgb(255, 0,  170,  60),
+                BiasState.Neutral     => Color.FromArgb(255, 160,160, 160),
+                BiasState.Short       => Color.FromArgb(255, 210, 50,  50),
+                BiasState.StrongShort => Color.FromArgb(255, 230, 20,  20),
                 _                     => Color.Gray
             };
-
             string arrow = _currentBias switch
             {
                 BiasState.StrongLong  => " ▲▲",
@@ -698,43 +787,38 @@ namespace IOF_AbsorptionDetector
                 _                     => ""
             };
 
-            string ema200Str = _ema200Init ? _ema200.ToString("F2") : "…";
-            string ema50Str  = _ema50Init  ? _ema50.ToString("F2")  : "…";
-            string ema20Str  = _ema20Init  ? _ema20.ToString("F2")  : "…";
-            string vwapStr   = _vwapCumVol > 0 ? _currentVwap.ToString("F2") : "…";
-
             var lines = new[]
             {
                 $"BIAS: {biasText}{arrow}",
-                $"EMA20:  {ema20Str}",
-                $"EMA50:  {ema50Str}",
-                $"EMA200: {ema200Str}",
-                $"VWAP:   {vwapStr}"
+                $"EMA20:  {(_ema20Init  ? _ema20.ToString("F2")       : "…")}",
+                $"EMA50:  {(_ema50Init  ? _ema50.ToString("F2")       : "…")}",
+                $"EMA200: {(_ema200Init ? _ema200.ToString("F2")      : "…")}",
+                $"VWAP:   {(_vwapCumVol > 0 ? _currentVwap.ToString("F2") : "…")}"
             };
 
             using var boxFont  = new Font("Consolas", 8f, FontStyle.Bold);
             using var valFont  = new Font("Consolas", 8f, FontStyle.Regular);
 
-            float lineH  = boxFont.GetHeight(gr) + 2;
-            float boxW   = 160f;
-            float boxH   = lineH * lines.Length + 10;
-            float boxX   = rect.Left + 8;
-            float boxY   = rect.Top  + 8;
+            float lineH = boxFont.GetHeight(gr) + 2;
+            float boxW  = 160f;
+            float boxH  = lineH * lines.Length + 10;
+            float boxX  = rect.Left + 8;
+            float boxY  = rect.Top  + 8;
 
             using var bgBrush   = new SolidBrush(Color.FromArgb(180, 10, 10, 20));
             using var borderPen = new Pen(biasColor, 1.5f);
             gr.FillRectangle(bgBrush,   boxX, boxY, boxW, boxH);
             gr.DrawRectangle(borderPen, boxX, boxY, boxW, boxH);
 
-            // First line = bias headline in bias color, rest in white
             using var biasBrush  = new SolidBrush(biasColor);
             using var whiteBrush = new SolidBrush(Color.FromArgb(220, 220, 220, 220));
 
             for (int i = 0; i < lines.Length; i++)
             {
-                var brush = i == 0 ? biasBrush : whiteBrush;
-                var font  = i == 0 ? boxFont   : valFont;
-                gr.DrawString(lines[i], font, brush, boxX + 6, boxY + 5 + i * lineH);
+                gr.DrawString(lines[i],
+                    i == 0 ? boxFont : valFont,
+                    i == 0 ? biasBrush : whiteBrush,
+                    boxX + 6, boxY + 5 + i * lineH);
             }
         }
     }
