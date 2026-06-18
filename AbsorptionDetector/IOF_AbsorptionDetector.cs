@@ -134,6 +134,9 @@ namespace IOF_AbsorptionDetector
         [InputParameter("Log file path", 96)]
         public string LogFilePath = "IOF_AbsorptionDetector_log.csv";
 
+        [InputParameter("Use volume proxy when cluster data not loaded", 97)]
+        public bool UseVolumeProxy = true;
+
         // ── Internal state ───────────────────────────────────────────────────────
 
         private class PendingConfirm
@@ -164,8 +167,10 @@ namespace IOF_AbsorptionDetector
 
         // EMA state
         private double _ema20 = 0, _ema50 = 0, _ema200 = 0;
+        private double _ema20Sum = 0, _ema50Sum = 0, _ema200Sum = 0;  // SMA accumulators for proper seeding
         private bool   _ema20Init = false, _ema50Init = false, _ema200Init = false;
         private int    _barCount  = 0;
+        private int    _prevCount = -1;  // Count-based bar detection
 
         // VWAP state — resets each session day
         private double   _vwapCumTPV = 0, _vwapCumVol = 0, _currentVwap = 0;
@@ -209,6 +214,8 @@ namespace IOF_AbsorptionDetector
             _vwapCumTPV = _vwapCumVol = _currentVwap = 0;
             _vwapDate   = DateTime.MinValue;
             _currentBias = BiasState.Neutral;
+            _ema20Sum = _ema50Sum = _ema200Sum = 0;
+            _prevCount = -1;
 
             try
             {
@@ -237,15 +244,23 @@ namespace IOF_AbsorptionDetector
             var bar = this.HistoricalData[0] as HistoryItemBar;
             if (bar == null) return;
 
-            bool isClose = args.Reason == UpdateReason.NewBar || args.Reason == UpdateReason.HistoricalBar;
+            // Reliable bar-close detection: Count increments exactly once per completed bar
+            int currentCount = this.Count;
+            bool isClose = currentCount != _prevCount;
+            if (isClose) _prevCount = currentCount;
+
             UpdateBiasIndicators(bar, isClose);
 
-            SetValue(_ema20Init  && ShowEmaLines  ? _ema20        : double.NaN, S_EMA20);
-            SetValue(_ema50Init  && ShowEmaLines  ? _ema50        : double.NaN, S_EMA50);
-            SetValue(_ema200Init && ShowEmaLines  ? _ema200       : double.NaN, S_EMA200);
-            SetValue(_vwapCumVol > 0 && ShowVwapLine ? _currentVwap : double.NaN, S_VWAP);
+            // Show EMA lines even during warmup (SMA value tracks close, then switches to EMA)
+            SetValue(ShowEmaLines  && _barCount > 0 ? _ema20        : double.NaN, S_EMA20);
+            SetValue(ShowEmaLines  && _barCount > 0 ? _ema50        : double.NaN, S_EMA50);
+            SetValue(ShowEmaLines  && _barCount > 0 ? _ema200       : double.NaN, S_EMA200);
+            SetValue(ShowVwapLine  && _vwapCumVol > 0 ? _currentVwap : double.NaN, S_VWAP);
 
-            if (!_volumeAnalysisLoaded || !isClose) return;
+            // Allow detection with proxy delta when cluster data not loaded
+            if (!isClose) return;
+            bool hasRealDelta = _volumeAnalysisLoaded;
+            if (!hasRealDelta && !UseVolumeProxy) return;
 
             int need = Math.Max(Math.Max(EffortLookback, NewExtremeLookback), CvdLookback) + FlipConfirmWindow + 3;
             if (this.HistoricalData.Count < need) return;
@@ -272,14 +287,31 @@ namespace IOF_AbsorptionDetector
                 double a50  = 2.0 / (EmaPeriod50  + 1);
                 double a200 = 2.0 / (EmaPeriod200 + 1);
 
-                if (!_ema20Init)  { _ema20  = close; _ema20Init  = _barCount >= EmaPeriod20;  }
-                else              { _ema20  = a20  * close + (1 - a20)  * _ema20;  }
+                // Accumulate SMA sum during warmup, then seed EMA from SMA average
+                _ema20Sum  += close;
+                _ema50Sum  += close;
+                _ema200Sum += close;
 
-                if (!_ema50Init)  { _ema50  = close; _ema50Init  = _barCount >= EmaPeriod50;  }
-                else              { _ema50  = a50  * close + (1 - a50)  * _ema50;  }
+                if (!_ema20Init)
+                {
+                    _ema20 = _ema20Sum / _barCount;  // running SMA seed
+                    if (_barCount >= EmaPeriod20) _ema20Init = true;
+                }
+                else { _ema20  = a20  * close + (1 - a20)  * _ema20; }
 
-                if (!_ema200Init) { _ema200 = close; _ema200Init = _barCount >= EmaPeriod200; }
-                else              { _ema200 = a200 * close + (1 - a200) * _ema200; }
+                if (!_ema50Init)
+                {
+                    _ema50 = _ema50Sum / _barCount;
+                    if (_barCount >= EmaPeriod50) _ema50Init = true;
+                }
+                else { _ema50  = a50  * close + (1 - a50)  * _ema50; }
+
+                if (!_ema200Init)
+                {
+                    _ema200 = _ema200Sum / _barCount;
+                    if (_barCount >= EmaPeriod200) _ema200Init = true;
+                }
+                else { _ema200 = a200 * close + (1 - a200) * _ema200; }
 
                 DateTime barDate = bar.TimeLeft.Date;
                 if (barDate != _vwapDate)
@@ -390,8 +422,21 @@ namespace IOF_AbsorptionDetector
 
         private double Delta(HistoryItemBar b)
         {
-            try { return b?.VolumeAnalysisData?.Total?.Delta ?? 0.0; }
-            catch { return 0.0; }
+            if (b == null) return 0.0;
+            try
+            {
+                double d = b.VolumeAnalysisData?.Total?.Delta ?? double.NaN;
+                if (!double.IsNaN(d)) return d;
+            }
+            catch { }
+
+            // Volume proxy: estimate delta from bar shape
+            // Positive (buyers) when close is in upper half; negative (sellers) when lower half
+            if (!UseVolumeProxy) return 0.0;
+            double range = b.High - b.Low;
+            if (range < 1e-10) return 0.0;
+            double position = (b.Close - b.Low) / range;  // 0=closed at low, 1=closed at high
+            return (position - 0.5) * 2.0 * b.Volume * 0.35;  // scale: ±35% of volume as proxy delta
         }
 
         private double Vol(HistoryItemBar b)
@@ -787,20 +832,27 @@ namespace IOF_AbsorptionDetector
                 _                     => ""
             };
 
+            string ema20str  = _barCount > 0  ? $"{_ema20.ToString("F2")}{(_ema20Init  ? "" : "*")}" : "…";
+            string ema50str  = _barCount > 0  ? $"{_ema50.ToString("F2")}{(_ema50Init  ? "" : "*")}" : "…";
+            string ema200str = _barCount > 0  ? $"{_ema200.ToString("F2")}{(_ema200Init ? "" : "*")}" : "…";
+            string vwapStr   = _vwapCumVol > 0 ? _currentVwap.ToString("F2") : "…";
+            string clusterTag = _volumeAnalysisLoaded ? "" : " [proxy]";
+
             var lines = new[]
             {
-                $"BIAS: {biasText}{arrow}",
-                $"EMA20:  {(_ema20Init  ? _ema20.ToString("F2")       : "…")}",
-                $"EMA50:  {(_ema50Init  ? _ema50.ToString("F2")       : "…")}",
-                $"EMA200: {(_ema200Init ? _ema200.ToString("F2")      : "…")}",
-                $"VWAP:   {(_vwapCumVol > 0 ? _currentVwap.ToString("F2") : "…")}"
+                $"BIAS: {biasText}{arrow}{clusterTag}",
+                $"EMA20:  {ema20str}",
+                $"EMA50:  {ema50str}",
+                $"EMA200: {ema200str}",
+                $"VWAP:   {vwapStr}",
+                $"Bars: {_barCount}"
             };
 
             using var boxFont  = new Font("Consolas", 8f, FontStyle.Bold);
             using var valFont  = new Font("Consolas", 8f, FontStyle.Regular);
 
             float lineH = boxFont.GetHeight(gr) + 2;
-            float boxW  = 160f;
+            float boxW  = 180f;
             float boxH  = lineH * lines.Length + 10;
             float boxX  = rect.Left + 8;
             float boxY  = rect.Top  + 8;
