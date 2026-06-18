@@ -506,8 +506,8 @@ namespace IOF_AbsorptionDetector
             var win  = this.CurrentChart.MainWindow;
             var rect = (Rectangle)win.ClientRectangle;
 
-            using var font      = new Font("Consolas", 8f, FontStyle.Bold);
-            using var smallFont = new Font("Consolas", 7f, FontStyle.Regular);
+            using var labelFont  = new Font("Arial", 11f, FontStyle.Bold);
+            using var detailFont = new Font("Consolas", 7f, FontStyle.Regular);
 
             foreach (var m in snap)
             {
@@ -519,43 +519,64 @@ namespace IOF_AbsorptionDetector
                 }
                 catch { continue; }
 
-                if (x < rect.Left - 60 || x > rect.Right + 60) continue;
+                if (x < rect.Left - 100 || x > rect.Right + 100) continue;
 
-                Color c = m.Level switch
+                bool isDemand = m.Side == AbsorptionSide.Demand;
+
+                // Bubble color: green = demand (buy), red = supply (sell)
+                // Watch = semi-transparent; Exhaustion/Confirmed = solid
+                Color bubbleColor;
+                if (m.Level == AlertLevel.Watch)
+                    bubbleColor = isDemand
+                        ? Color.FromArgb(120, 0, 200, 80)
+                        : Color.FromArgb(120, 220, 40, 40);
+                else
+                    bubbleColor = isDemand
+                        ? Color.FromArgb(220, 0, 210, 80)
+                        : Color.FromArgb(220, 230, 30, 30);
+
+                int radius = m.Level == AlertLevel.Exhaustion ? 12
+                           : m.Level == AlertLevel.Confirmed  ? 10
+                           : 6;
+
+                // Position bubble below bar for demand, above for supply
+                int gap     = radius + 6;
+                int centerY = isDemand ? y + gap : y - gap;
+
+                using var brush     = new SolidBrush(bubbleColor);
+                using var rimPen    = new Pen(Color.White, 1.5f);
+                using var textBrush = new SolidBrush(Color.White);
+
+                // Draw filled bubble with white rim
+                gr.FillEllipse(brush,    x - radius, centerY - radius, radius * 2, radius * 2);
+                gr.DrawEllipse(rimPen,   x - radius, centerY - radius, radius * 2, radius * 2);
+
+                // "BUY NOW" / "SELL NOW" label on Exhaustion and Confirmed bars
+                if (m.Level == AlertLevel.Exhaustion || m.Level == AlertLevel.Confirmed)
                 {
-                    AlertLevel.Watch      => WatchColor,
-                    AlertLevel.Exhaustion => ExhaustionColor,
-                    AlertLevel.Confirmed  => m.Side == AbsorptionSide.Demand ? ConfirmedLongColor : ConfirmedShortColor,
-                    _                     => Color.Gray
-                };
+                    string callout = isDemand ? "BUY NOW" : "SELL NOW";
+                    var    sz      = gr.MeasureString(callout, labelFont);
+                    int    textX   = x - (int)(sz.Width / 2);
+                    int    textY   = isDemand
+                        ? centerY + radius + 3
+                        : centerY - radius - (int)sz.Height - 3;
 
-                // Arrow tip offset: below bar for demand, above for supply
-                bool isDemand  = m.Side == AbsorptionSide.Demand;
-                int  arrowSize = m.Level == AlertLevel.Exhaustion ? 9 : m.Level == AlertLevel.Confirmed ? 8 : 5;
-                int  offsetY   = isDemand ? arrowSize + 4 : -(arrowSize + 4);
+                    // Dark shadow for legibility
+                    using var shadowBrush = new SolidBrush(Color.FromArgb(160, 0, 0, 0));
+                    gr.DrawString(callout, labelFont, shadowBrush, textX + 1, textY + 1);
+                    gr.DrawString(callout, labelFont, textBrush,   textX,     textY);
 
-                using var brush = new SolidBrush(c);
-                using var pen   = new Pen(c, 1.5f);
-
-                // Draw triangle (arrow)
-                Point tip  = new Point(x, y + offsetY);
-                Point left, right;
-                if (isDemand) // pointing up (toward bar)
-                {
-                    left  = new Point(x - arrowSize / 2, y + offsetY + arrowSize);
-                    right = new Point(x + arrowSize / 2, y + offsetY + arrowSize);
-                }
-                else           // pointing down
-                {
-                    left  = new Point(x - arrowSize / 2, y + offsetY - arrowSize);
-                    right = new Point(x + arrowSize / 2, y + offsetY - arrowSize);
-                }
-                gr.FillPolygon(brush, new[] { tip, left, right });
-
-                if (m.Level != AlertLevel.Watch)
-                {
-                    int textY = isDemand ? y + offsetY + arrowSize + 2 : y + offsetY - arrowSize - 13;
-                    gr.DrawString(m.Label, smallFont, brush, x - arrowSize, textY);
+                    // Small detail line below the callout (delta context)
+                    if (m.Level == AlertLevel.Exhaustion)
+                    {
+                        var   detailSz = gr.MeasureString(m.Label, detailFont);
+                        int   detailX  = x - (int)(detailSz.Width / 2);
+                        int   detailY  = isDemand
+                            ? textY + (int)sz.Height + 1
+                            : textY - (int)detailSz.Height - 1;
+                        using var detailBrush = new SolidBrush(Color.FromArgb(200, 220, 220, 220));
+                        gr.DrawString(m.Label, detailFont, detailBrush, detailX, detailY);
+                    }
                 }
             }
         }
