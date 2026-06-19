@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <LangVersion>latest</LangVersion>
     <AssemblyName>IOF_TrendLab</AssemblyName>
     <RootNamespace>IOF_TrendLab</RootNamespace>
