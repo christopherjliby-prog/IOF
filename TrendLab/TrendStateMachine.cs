@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════════════════════
 // TrendStateMachine.cs — Engulfing-candle control points + persistent
-// HH/HL/HH (or LH/LL/LH) trend state machine for the OnlyFutures IOF v2
+// HH/HL/HH (or LH/LL/LH) trend state machine for the TradePhantoms IOF v2
 // Quantower indicator system.
 // ════════════════════════════════════════════════════════════════════════════
 //
@@ -24,7 +24,7 @@
 //   * Body-close logic is mandatory for break detection — wicks are noise.
 //
 // Self-contained: no Quantower SDK reference; pure logic the master indicator
-// drives via OnBarClose(). Single namespace OnlyFuturesIOF.Trend so the
+// drives via OnBarClose(). Single namespace TradePhantomsIOF.Trend so the
 // master file just imports and instantiates.
 //
 // File is intentionally event-driven: consumers wire OnControlPointDetected /
@@ -40,7 +40,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 
-namespace OnlyFuturesIOF.Trend
+namespace TradePhantomsIOF.Trend
 {
     // ────────────────────────────────────────────────────────────────────────
     // ENUMS

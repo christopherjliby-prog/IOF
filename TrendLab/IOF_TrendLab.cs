@@ -6,7 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using OnlyFuturesIOF.Trend;
+using TradePhantomsIOF.Trend;
 using TradingPlatform.BusinessLayer;
 
 namespace IOF_TrendLab
