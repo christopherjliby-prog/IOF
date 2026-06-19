@@ -173,8 +173,8 @@ namespace IOF_TrendLab
 
         protected override void OnInit()
         {
-            AddLineSeries("Dummy", Color.Transparent, 0, LineStyle.Solid);
             SeparateWindow = false;
+            AddLineSeries("Dummy", Color.Transparent, 1, LineStyle.Solid);
 
             _feeds            = new HistoricalData[TF_COUNT];
             _machines         = new TrendStateMachine[TF_COUNT];
