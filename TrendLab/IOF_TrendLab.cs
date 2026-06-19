@@ -1,7 +1,8 @@
 // IOF_TrendLab.cs
-// Multi-timeframe trend dashboard: shows Bull/Bear/Flat for 8 timeframes simultaneously.
-// Follows ZoneLab architecture for MTF data fetching.
-// Uses TrendStateMachine (3-segment body-close logic, Mr. Black methodology).
+// Full-featured multi-timeframe trend dashboard.
+// Mr. Black methodology: 3-segment body-close structure, control points shift on every new HH/LL.
+// Wicks never establish or break trend — body closes only.
+// Panel mirrors ZoneLab architecture: fully adjustable via InputParameters.
 
 using System;
 using System.Collections.Generic;
@@ -13,63 +14,146 @@ namespace IOF_TrendLab
 {
     public class IOF_TrendLab : Indicator
     {
-        // ── Parameters ────────────────────────────────────────────────────────
+        // ── Trend Logic Settings ───────────────────────────────────────────
 
         [InputParameter("Swing Fractal Lookback", 0, 1, 10, 1, 0)]
         public int SwingLookback = 3;
 
-        [InputParameter("Require Engulfing for Control Point", 1)]
+        [InputParameter("Required Segments (3 = Mr. Black default)", 1, 2, 6, 1, 0)]
+        public int RequireSegments = 3;
+
+        [InputParameter("Require Engulfing for Control Point", 2)]
         public bool RequireEngulfing = false;
 
-        [InputParameter("History Days (Monthly)", 2, 30, 3650, 30, 0)]
-        public int HistDaysMN = 1825;   // 5 years
+        [InputParameter("Body-Close Tick Tolerance", 3, 0, 10, 1, 0)]
+        public int BodyCloseTolerance = 0;
 
-        [InputParameter("History Days (Weekly)", 3, 7, 1825, 7, 0)]
-        public int HistDaysW = 730;     // 2 years
+        // ── History Depth Per Timeframe ────────────────────────────────────
 
-        [InputParameter("History Days (Daily)", 4, 7, 730, 7, 0)]
-        public int HistDaysD = 365;     // 1 year
+        [InputParameter("History Days (Monthly)", 10, 30, 3650, 30, 0)]
+        public int HistDaysMN = 1825;
 
-        [InputParameter("History Days (4H)", 5, 1, 365, 1, 0)]
+        [InputParameter("History Days (Weekly)", 11, 7, 1825, 7, 0)]
+        public int HistDaysW = 730;
+
+        [InputParameter("History Days (Daily)", 12, 7, 730, 7, 0)]
+        public int HistDaysD = 365;
+
+        [InputParameter("History Days (4H)", 13, 1, 365, 1, 0)]
         public int HistDays4H = 90;
 
-        [InputParameter("History Days (1H)", 6, 1, 180, 1, 0)]
+        [InputParameter("History Days (1H)", 14, 1, 180, 1, 0)]
         public int HistDays1H = 30;
 
-        [InputParameter("History Days (15M)", 7, 1, 90, 1, 0)]
+        [InputParameter("History Days (15M)", 15, 1, 90, 1, 0)]
         public int HistDays15M = 14;
 
-        [InputParameter("History Days (5M)", 8, 1, 30, 1, 0)]
+        [InputParameter("History Days (5M)", 16, 1, 30, 1, 0)]
         public int HistDays5M = 7;
 
-        [InputParameter("History Days (1M)", 9, 1, 14, 1, 0)]
+        [InputParameter("History Days (1M)", 17, 1, 14, 1, 0)]
         public int HistDays1M = 3;
 
-        [InputParameter("Panel X Offset (px)", 10, 0, 2000, 1, 0)]
+        // ── Timeframe Visibility Toggles ───────────────────────────────────
+
+        [InputParameter("Show Monthly", 20)]
+        public bool ShowMN = true;
+
+        [InputParameter("Show Weekly", 21)]
+        public bool ShowW = true;
+
+        [InputParameter("Show Daily", 22)]
+        public bool ShowD = true;
+
+        [InputParameter("Show 4H", 23)]
+        public bool Show4H = true;
+
+        [InputParameter("Show 1H", 24)]
+        public bool Show1H = true;
+
+        [InputParameter("Show 15M", 25)]
+        public bool Show15M = true;
+
+        [InputParameter("Show 5M", 26)]
+        public bool Show5M = true;
+
+        [InputParameter("Show 1M", 27)]
+        public bool Show1M = true;
+
+        // ── Panel Layout ───────────────────────────────────────────────────
+
+        [InputParameter("Panel X Offset (px)", 30, 0, 2000, 1, 0)]
         public int PanelX = 10;
 
-        [InputParameter("Panel Y Offset (px)", 11, 0, 2000, 1, 0)]
+        [InputParameter("Panel Y Offset (px)", 31, 0, 2000, 1, 0)]
         public int PanelY = 10;
 
-        [InputParameter("Row Height (px)", 12, 14, 50, 1, 0)]
-        public int RowHeight = 22;
+        [InputParameter("Row Height (px)", 32, 14, 60, 1, 0)]
+        public int RowHeight = 24;
 
-        [InputParameter("Panel Width (px)", 13, 80, 400, 1, 0)]
-        public int PanelWidth = 180;
+        [InputParameter("Panel Width (px)", 33, 100, 500, 1, 0)]
+        public int PanelWidth = 200;
 
-        // ── Timeframe definitions ─────────────────────────────────────────────
+        [InputParameter("Font Size", 34, 6, 18, 1, 0)]
+        public int FontSize = 9;
 
-        private static readonly string[] TF_LABELS = { "MN", "W", "D", "4H", "1H", "15M", "5M", "1M" };
+        [InputParameter("Label Column Width (px)", 35, 20, 100, 1, 0)]
+        public int LabelColWidth = 44;
 
+        // ── Display Options ────────────────────────────────────────────────
+
+        [InputParameter("Show Control Point Price", 40)]
+        public bool ShowControlPrice = true;
+
+        [InputParameter("Show Bar Count", 41)]
+        public bool ShowBarCount = false;
+
+        [InputParameter("Show Title Bar", 42)]
+        public bool ShowTitle = true;
+
+        [InputParameter("Min Bars Before Showing State (warm-up)", 43, 1, 50, 1, 0)]
+        public int WarmupBars = 6;
+
+        // ── Colors ─────────────────────────────────────────────────────────
+
+        [InputParameter("Bull Color", 50)]
+        public Color BullColor = Color.FromArgb(0, 160, 60);
+
+        [InputParameter("Bear Color", 51)]
+        public Color BearColor = Color.FromArgb(200, 30, 30);
+
+        [InputParameter("Flat Color", 52)]
+        public Color FlatColor = Color.FromArgb(60, 60, 70);
+
+        [InputParameter("Loading Color", 53)]
+        public Color LoadingColor = Color.FromArgb(35, 35, 35);
+
+        [InputParameter("Panel Background Color", 54)]
+        public Color PanelBgColor = Color.FromArgb(200, 15, 15, 15);
+
+        [InputParameter("Panel Border Color", 55)]
+        public Color BorderColor = Color.FromArgb(80, 80, 80);
+
+        [InputParameter("Label Text Color", 56)]
+        public Color LabelTextColor = Color.FromArgb(180, 180, 180);
+
+        [InputParameter("State Text Color", 57)]
+        public Color StateTextColor = Color.White;
+
+        [InputParameter("Title Text Color", 58)]
+        public Color TitleTextColor = Color.FromArgb(220, 220, 220);
+
+        // ── Internal ───────────────────────────────────────────────────────
+
+        private static readonly string[] TF_LABELS  = { "MN", "W", "D", "4H", "1H", "15M", "5M", "1M" };
         private static readonly Period[] TF_PERIODS = {
-            Period.MONTH1,
-            Period.WEEK1,
-            Period.DAY1,
-            Period.HOUR4,
-            Period.HOUR1,
-            Period.MIN15,
-            Period.MIN5,
-            Period.MIN1
+            Period.MONTH1, Period.WEEK1, Period.DAY1, Period.HOUR4,
+            Period.HOUR1, Period.MIN15, Period.MIN5, Period.MIN1
+        };
+        private const int TF_COUNT = 8;
+
+        private bool[] TF_VISIBLE => new bool[] {
+            ShowMN, ShowW, ShowD, Show4H, Show1H, Show15M, Show5M, Show1M
         };
 
         private int[] HistDays => new int[] {
@@ -77,28 +161,28 @@ namespace IOF_TrendLab
             HistDays1H, HistDays15M, HistDays5M, HistDays1M
         };
 
-        private const int TF_COUNT = 8;
-
-        // ── State ─────────────────────────────────────────────────────────────
-
-        private HistoricalData[] _feeds;
+        private HistoricalData[]    _feeds;
         private TrendStateMachine[] _machines;
-        private int[] _lastProcessedIdx;   // last bar index fed into each TSM (feed-indexed)
-        private double _tickSize;
+        private int[]               _lastProcessedIdx;
+        private double              _tickSize;
 
-        // ── Lifecycle ──────────────────────────────────────────────────────────
+        // Track last snapshot per TF for the panel (avoids re-calling GetSnapshot every paint tick)
+        private TrendSnapshot[] _snapshots;
+
+        // ── Lifecycle ──────────────────────────────────────────────────────
 
         protected override void OnInit()
         {
-            // This indicator draws only a panel; no price series needed.
-            // Using a single dummy series to satisfy the framework.
             AddLineSeries("Dummy", Color.Transparent, 0, LineStyle.Solid);
             SeparateWindow = false;
 
             _feeds            = new HistoricalData[TF_COUNT];
             _machines         = new TrendStateMachine[TF_COUNT];
             _lastProcessedIdx = new int[TF_COUNT];
+            _snapshots        = new TrendSnapshot[TF_COUNT];
             _tickSize         = this.Symbol?.TickSize ?? 0.25;
+
+            double tickTol = BodyCloseTolerance * _tickSize;
 
             for (int i = 0; i < TF_COUNT; i++)
             {
@@ -106,15 +190,15 @@ namespace IOF_TrendLab
 
                 _machines[i] = new TrendStateMachine
                 {
-                    SwingFractalLookback         = SwingLookback,
-                    RequireEngulfingForControlPoint = RequireEngulfing,
-                    RequireSegments              = 3
+                    SwingFractalLookback            = SwingLookback,
+                    RequireEngulfingForControlPoint  = RequireEngulfing,
+                    RequireSegments                  = RequireSegments,
                 };
 
                 try
                 {
-                    DateTime fromTime = DateTime.UtcNow.AddDays(-HistDays[i]);
-                    _feeds[i] = this.Symbol.GetHistory(TF_PERIODS[i], fromTime, DateTime.UtcNow);
+                    DateTime from = DateTime.UtcNow.AddDays(-HistDays[i]);
+                    _feeds[i] = this.Symbol.GetHistory(TF_PERIODS[i], from, DateTime.UtcNow);
                 }
                 catch
                 {
@@ -125,13 +209,16 @@ namespace IOF_TrendLab
 
         protected override void OnUpdate(UpdateArgs args)
         {
-            // Drive all 8 MTF state machines with any newly closed bars.
+            for (int i = 0; i < TF_COUNT; i++)
+                ProcessFeed(i);
+
+            // Refresh snapshots so the paint loop has current data
             for (int i = 0; i < TF_COUNT; i++)
             {
-                ProcessFeed(i);
+                if (_machines[i] != null)
+                    _snapshots[i] = _machines[i].GetSnapshot();
             }
 
-            // Keep the dummy series populated so the indicator doesn't complain.
             SetValue(double.NaN, 0);
         }
 
@@ -145,7 +232,7 @@ namespace IOF_TrendLab
             }
         }
 
-        // ── MTF bar processing ─────────────────────────────────────────────────
+        // ── MTF Bar Processing ─────────────────────────────────────────────
 
         private void ProcessFeed(int idx)
         {
@@ -153,13 +240,11 @@ namespace IOF_TrendLab
             if (feed == null) return;
 
             int count = feed.Count;
-            if (count < 2) return;  // need at least 1 closed bar + forming bar
+            if (count < 2) return;
 
-            // Last closed bar is at [count - 2] (0=oldest indexing from GetHistory).
             int lastClosed = count - 2;
-
-            int startFrom = _lastProcessedIdx[idx] + 1;
-            if (startFrom > lastClosed) return;  // no new closed bars
+            int startFrom  = _lastProcessedIdx[idx] + 1;
+            if (startFrom > lastClosed) return;
 
             for (int j = startFrom; j <= lastClosed; j++)
             {
@@ -179,60 +264,87 @@ namespace IOF_TrendLab
             _lastProcessedIdx[idx] = lastClosed;
         }
 
-        // ── Dashboard rendering ────────────────────────────────────────────────
+        // ── Painting ───────────────────────────────────────────────────────
 
         public override void OnPaintChart(PaintChartEventArgs args)
         {
             base.OnPaintChart(args);
-
             var g = args.Graphics;
             if (g == null) return;
-
-            DrawDashboard(g, args.Rectangle);
+            DrawPanel(g, args.Rectangle);
         }
 
-        private void DrawDashboard(Graphics g, Rectangle chartRect)
+        private void DrawPanel(Graphics g, Rectangle chartRect)
         {
-            int panelHeight = TF_COUNT * RowHeight + 4;
-            int x = chartRect.Left + PanelX;
-            int y = chartRect.Top  + PanelY;
+            // Count visible rows
+            bool[] vis = TF_VISIBLE;
+            int visibleRows = 0;
+            for (int i = 0; i < TF_COUNT; i++)
+                if (vis[i]) visibleRows++;
 
-            // Panel background
-            using (var bgBrush = new SolidBrush(Color.FromArgb(200, 15, 15, 15)))
+            if (visibleRows == 0) return;
+
+            int titleH     = ShowTitle ? RowHeight : 0;
+            int panelHeight = visibleRows * RowHeight + titleH + 4;
+            int x          = chartRect.Left + PanelX;
+            int y          = chartRect.Top  + PanelY;
+
+            // Background + border
+            using (var bgBrush  = new SolidBrush(PanelBgColor))
                 g.FillRectangle(bgBrush, x, y, PanelWidth, panelHeight);
-
-            using (var borderPen = new Pen(Color.FromArgb(80, 80, 80)))
+            using (var borderPen = new Pen(BorderColor))
                 g.DrawRectangle(borderPen, x, y, PanelWidth - 1, panelHeight - 1);
 
-            int labelW  = 40;
-            int stateW  = PanelWidth - labelW - 8;
-            int rowX    = x + 4;
-            int stateX  = rowX + labelW;
+            float  fSize    = Math.Max(6f, FontSize);
+            int    stateW   = PanelWidth - LabelColWidth - 8;
+            int    rowX     = x + 4;
+            int    stateX   = rowX + LabelColWidth;
+            int    curY     = y + 2;
 
-            using (var labelFont = new Font("Consolas", 9f, FontStyle.Bold))
-            using (var stateFont = new Font("Consolas", 9f, FontStyle.Bold))
+            using (var labelFont = new Font("Consolas", fSize, FontStyle.Bold))
+            using (var stateFont = new Font("Consolas", fSize, FontStyle.Bold))
+            using (var titleFont = new Font("Consolas", fSize - 1f > 6f ? fSize - 1f : 6f, FontStyle.Bold))
             {
+                // Title bar
+                if (ShowTitle)
+                {
+                    using (var titleBrush = new SolidBrush(TitleTextColor))
+                    {
+                        string title = "IOF TREND";
+                        var sz = g.MeasureString(title, titleFont);
+                        float tx = x + (PanelWidth - sz.Width) / 2f;
+                        float ty = curY + (RowHeight - sz.Height) / 2f;
+                        g.DrawString(title, titleFont, titleBrush, tx, ty);
+                    }
+                    // separator line
+                    using (var sepPen = new Pen(BorderColor))
+                        g.DrawLine(sepPen, x, curY + RowHeight, x + PanelWidth - 1, curY + RowHeight);
+                    curY += RowHeight;
+                }
+
+                // Rows
                 for (int i = 0; i < TF_COUNT; i++)
                 {
-                    int rowY = y + 2 + i * RowHeight;
+                    if (!vis[i]) continue;
+
+                    int rowY = curY;
+                    curY += RowHeight;
 
                     // TF label
-                    using (var labelBrush = new SolidBrush(Color.FromArgb(180, 180, 180)))
-                        g.DrawString(TF_LABELS[i], labelFont, labelBrush, rowX, rowY + 3);
+                    using (var lb = new SolidBrush(LabelTextColor))
+                        g.DrawString(TF_LABELS[i], labelFont, lb, rowX, rowY + (RowHeight - FontSize) / 2f - 1);
 
-                    // State
-                    TrendState state = _machines != null && _machines[i] != null
-                        ? _machines[i].CurrentState
-                        : TrendState.Flat;
+                    // Determine state
+                    var snap    = _snapshots[i];
+                    bool loaded = _lastProcessedIdx != null && _lastProcessedIdx[i] >= WarmupBars;
+                    TrendState state = snap != null ? snap.State : TrendState.Flat;
 
-                    bool hasData = _lastProcessedIdx != null && _lastProcessedIdx[i] > 5;
-
-                    Color bgColor;
+                    Color  bgColor;
                     string stateLabel;
 
-                    if (!hasData)
+                    if (!loaded)
                     {
-                        bgColor    = Color.FromArgb(40, 40, 40);
+                        bgColor    = LoadingColor;
                         stateLabel = "LOADING";
                     }
                     else
@@ -240,37 +352,67 @@ namespace IOF_TrendLab
                         switch (state)
                         {
                             case TrendState.Bull:
-                                bgColor    = Color.FromArgb(0, 160, 60);
+                                bgColor    = BullColor;
                                 stateLabel = "BULL";
                                 break;
                             case TrendState.Bear:
-                                bgColor    = Color.FromArgb(200, 30, 30);
+                                bgColor    = BearColor;
                                 stateLabel = "BEAR";
                                 break;
                             default:
-                                bgColor    = Color.FromArgb(60, 60, 70);
+                                bgColor    = FlatColor;
                                 stateLabel = "FLAT";
                                 break;
                         }
                     }
 
+                    // State background box
                     using (var stateBg = new SolidBrush(bgColor))
                         g.FillRectangle(stateBg, stateX, rowY + 1, stateW, RowHeight - 3);
 
-                    using (var stateBrush = new SolidBrush(Color.White))
+                    // State label — centered in box, or left-aligned if showing control price
+                    using (var stBrush = new SolidBrush(StateTextColor))
                     {
-                        var strSize = g.MeasureString(stateLabel, stateFont);
-                        float sx = stateX + (stateW - strSize.Width) / 2f;
-                        float sy = rowY + (RowHeight - strSize.Height) / 2f;
-                        g.DrawString(stateLabel, stateFont, stateBrush, sx, sy);
+                        if (ShowControlPrice && loaded && state != TrendState.Flat && snap != null
+                            && !double.IsNaN(snap.ControllingPivotPrice))
+                        {
+                            // Left: state label, Right: control price
+                            string priceStr = snap.ControllingPivotPrice.ToString("F2");
+                            var    labSz    = g.MeasureString(stateLabel, stateFont);
+                            var    priceSz  = g.MeasureString(priceStr, stateFont);
+                            float  ly       = rowY + (RowHeight - labSz.Height) / 2f;
+                            float  py       = rowY + (RowHeight - priceSz.Height) / 2f;
+                            g.DrawString(stateLabel, stateFont, stBrush, stateX + 3, ly);
+                            // price right-aligned
+                            float px = stateX + stateW - priceSz.Width - 3;
+                            if (px > stateX + labSz.Width + 4)
+                                g.DrawString(priceStr, stateFont, stBrush, px, py);
+                        }
+                        else
+                        {
+                            var sz = g.MeasureString(stateLabel, stateFont);
+                            float sx = stateX + (stateW - sz.Width)  / 2f;
+                            float sy = rowY  + (RowHeight - sz.Height) / 2f;
+                            g.DrawString(stateLabel, stateFont, stBrush, sx, sy);
+                        }
                     }
+
+                    // Bar count badge (debug/tuning aid)
+                    if (ShowBarCount && loaded)
+                    {
+                        string cnt = _lastProcessedIdx[i].ToString();
+                        using (var cntBrush = new SolidBrush(Color.FromArgb(120, 120, 120)))
+                        using (var cntFont  = new Font("Consolas", Math.Max(6f, fSize - 2f)))
+                        {
+                            g.DrawString(cnt, cntFont, cntBrush, rowX, rowY + RowHeight - cntFont.Height - 1);
+                        }
+                    }
+
+                    // Row separator
+                    using (var sepPen = new Pen(Color.FromArgb(40, 80, 80, 80)))
+                        g.DrawLine(sepPen, x + 1, rowY + RowHeight - 1, x + PanelWidth - 2, rowY + RowHeight - 1);
                 }
             }
-
-            // Title bar at bottom of panel
-            int titleY = y + panelHeight - RowHeight - 1;
-            // Optional: draw bar counts for debugging
-            // (omitted for clean production display)
         }
     }
 }
