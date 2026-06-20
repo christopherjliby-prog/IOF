@@ -202,24 +202,34 @@ namespace TradePhantomsIOF.Trend
         // ─────────────────────────────────────────────────────────────────────
         private void UpdateControlPoints()
         {
-            int n = _legs.Count;
-            if (n < 3) return;
+            if (_legs.Count < 1) return;
 
-            var a = _legs[n - 3];
-            var b = _legs[n - 2];
-            var c = _legs[n - 1];
+            var latest = _legs[_legs.Count - 1];
 
-            if (a.Direction == 1 && b.Direction == -1 && c.Direction == 1
-                && c.Extreme > a.Extreme)
+            // Controlling High = highest HH close ever seen (only rises)
+            if (latest.Direction == 1)
             {
-                if (double.IsNaN(_ctrlHigh) || c.Extreme > _ctrlHigh)
-                    _ctrlHigh = c.Extreme;
+                // Is this leg a HH relative to the previous bull leg?
+                Leg prevBull = null;
+                for (int i = _legs.Count - 2; i >= 0; i--)
+                    if (_legs[i].Direction == 1) { prevBull = _legs[i]; break; }
+
+                bool isHH = prevBull == null || latest.Extreme > prevBull.Extreme;
+                if (isHH && (double.IsNaN(_ctrlHigh) || latest.Extreme > _ctrlHigh))
+                    _ctrlHigh = latest.Extreme;
             }
-            else if (a.Direction == -1 && b.Direction == 1 && c.Direction == -1
-                     && c.Extreme < a.Extreme)
+
+            // Controlling Low = lowest LL close ever seen (only falls)
+            if (latest.Direction == -1)
             {
-                if (double.IsNaN(_ctrlLow) || c.Extreme < _ctrlLow)
-                    _ctrlLow = c.Extreme;
+                // Is this leg a LL relative to the previous bear leg?
+                Leg prevBear = null;
+                for (int i = _legs.Count - 2; i >= 0; i--)
+                    if (_legs[i].Direction == -1) { prevBear = _legs[i]; break; }
+
+                bool isLL = prevBear == null || latest.Extreme < prevBear.Extreme;
+                if (isLL && (double.IsNaN(_ctrlLow) || latest.Extreme < _ctrlLow))
+                    _ctrlLow = latest.Extreme;
             }
         }
 
