@@ -1,8 +1,8 @@
 // IOF_TrendLab.cs
-// Full-featured multi-timeframe trend dashboard.
-// Mr. Black methodology: 3-segment body-close structure, control points shift on every new HH/LL.
-// Wicks never establish or break trend — body closes only.
-// Panel mirrors ZoneLab architecture: fully adjustable via InputParameters.
+// Multi-timeframe trend dashboard + current-chart structure drawing.
+// Mr. Black leg-based methodology: 3-segment structures, body closes only.
+// Dual control points: ControllingHigh (bull HH) + ControllingLow (bear LL).
+// FLAT when price is between both. No direct Bull→Bear flip.
 
 using System;
 using System.Collections.Generic;
@@ -114,6 +114,26 @@ namespace IOF_TrendLab
         [InputParameter("Min Bars Before Showing State (warm-up)", 43, 1, 50, 1, 0)]
         public int WarmupBars = 6;
 
+        // ── Chart Drawing ──────────────────────────────────────────────────
+
+        [InputParameter("Draw Structure Labels (HH/HL/LH/LL)", 60)]
+        public bool DrawLabels = true;
+
+        [InputParameter("Draw Controlling High Zone", 61)]
+        public bool DrawCtrlHigh = true;
+
+        [InputParameter("Draw Controlling Low Zone", 62)]
+        public bool DrawCtrlLow = true;
+
+        [InputParameter("Structure Label Font Size", 63, 6, 16, 1, 0)]
+        public int LabelFontSize = 8;
+
+        [InputParameter("Zone Line Thickness (px)", 64, 1, 5, 1, 0)]
+        public int ZoneLineThick = 2;
+
+        [InputParameter("Zone Fill Alpha (0-255)", 65, 0, 255, 1, 0)]
+        public int ZoneFillAlpha = 30;
+
         // ── Colors ─────────────────────────────────────────────────────────
 
         [InputParameter("Bull Color", 50)]
@@ -143,6 +163,24 @@ namespace IOF_TrendLab
         [InputParameter("Title Text Color", 58)]
         public Color TitleTextColor = Color.FromArgb(220, 220, 220);
 
+        [InputParameter("Controlling High Color", 66)]
+        public Color CtrlHighColor = Color.FromArgb(200, 30, 30);
+
+        [InputParameter("Controlling Low Color", 67)]
+        public Color CtrlLowColor = Color.FromArgb(0, 160, 60);
+
+        [InputParameter("HH Label Color", 68)]
+        public Color HHColor = Color.FromArgb(0, 200, 80);
+
+        [InputParameter("LL Label Color", 69)]
+        public Color LLColor = Color.FromArgb(220, 40, 40);
+
+        [InputParameter("HL Label Color", 70)]
+        public Color HLColor = Color.FromArgb(0, 160, 60);
+
+        [InputParameter("LH Label Color", 71)]
+        public Color LHColor = Color.FromArgb(180, 30, 30);
+
         // ── Internal ───────────────────────────────────────────────────────
 
         private static readonly string[] TF_LABELS  = { "MN", "W", "D", "4H", "1H", "15M", "5M", "1M" };
@@ -165,9 +203,12 @@ namespace IOF_TrendLab
         private TrendStateMachine[] _machines;
         private int[]               _lastProcessedIdx;
         private double              _tickSize;
+        private TrendSnapshot[]     _snapshots;
 
-        // Track last snapshot per TF for the panel (avoids re-calling GetSnapshot every paint tick)
-        private TrendSnapshot[] _snapshots;
+        // Chart-TF machine (for drawing on current chart)
+        private TrendStateMachine   _chartMachine;
+        private int                 _chartLastBar = -1;
+        private TrendSnapshot       _chartSnapshot;
 
         // ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -182,12 +223,12 @@ namespace IOF_TrendLab
             _snapshots        = new TrendSnapshot[TF_COUNT];
             _tickSize         = this.Symbol?.TickSize ?? 0.25;
 
-            double tickTol = BodyCloseTolerance * _tickSize;
+            _chartMachine = new TrendStateMachine();
+            _chartLastBar = -1;
 
             for (int i = 0; i < TF_COUNT; i++)
             {
                 _lastProcessedIdx[i] = -1;
-
                 _machines[i] = new TrendStateMachine
                 {
                     SwingFractalLookback            = SwingLookback,
@@ -209,10 +250,25 @@ namespace IOF_TrendLab
 
         protected override void OnUpdate(UpdateArgs args)
         {
+            // Process chart-TF bars for the drawing machine
+            var mainFeed = this.HistoricalData;
+            if (mainFeed != null && mainFeed.Count >= 2)
+            {
+                int lastClosed = mainFeed.Count - 2;
+                for (int j = _chartLastBar + 1; j <= lastClosed; j++)
+                {
+                    var bar = mainFeed[j] as HistoryItemBar;
+                    if (bar != null)
+                        _chartMachine.OnBarClose(j, bar.TimeLeft, bar.Open, bar.High, bar.Low, bar.Close, _tickSize);
+                }
+                _chartLastBar = lastClosed;
+            }
+            _chartSnapshot = _chartMachine.GetSnapshot();
+
+            // Process MTF feeds
             for (int i = 0; i < TF_COUNT; i++)
                 ProcessFeed(i);
 
-            // Refresh snapshots so the paint loop has current data
             for (int i = 0; i < TF_COUNT; i++)
             {
                 if (_machines[i] != null)
@@ -252,13 +308,7 @@ namespace IOF_TrendLab
                 if (bar == null) continue;
 
                 _machines[idx].OnBarClose(
-                    j,
-                    bar.TimeLeft,
-                    bar.Open,
-                    bar.High,
-                    bar.Low,
-                    bar.Close,
-                    _tickSize);
+                    j, bar.TimeLeft, bar.Open, bar.High, bar.Low, bar.Close, _tickSize);
             }
 
             _lastProcessedIdx[idx] = lastClosed;
@@ -271,12 +321,108 @@ namespace IOF_TrendLab
             base.OnPaintChart(args);
             var g = args.Graphics;
             if (g == null) return;
+
+            // Draw chart structure (labels + zones) on current TF
+            DrawChartStructure(g, args.Rectangle);
+
+            // Draw MTF panel
             DrawPanel(g, args.Rectangle);
         }
 
+        // ── Chart Structure Drawing ────────────────────────────────────────
+
+        private void DrawChartStructure(Graphics g, Rectangle chartRect)
+        {
+            if (_chartSnapshot == null) return;
+
+            var win = this.CurrentChart?.MainWindow;
+            if (win == null) return;
+
+            // ── Controlling High zone ──────────────────────────────────────
+            if (DrawCtrlHigh && !double.IsNaN(_chartSnapshot.ControllingHigh))
+            {
+                float y = (float)win.CoordinatesConverter.GetChartY(_chartSnapshot.ControllingHigh);
+                if (y >= chartRect.Top && y <= chartRect.Bottom)
+                {
+                    // Fill zone (thin band)
+                    int bandH = Math.Max(2, ZoneLineThick * 2);
+                    using (var fill = new SolidBrush(Color.FromArgb(ZoneFillAlpha, CtrlHighColor)))
+                        g.FillRectangle(fill, chartRect.Left, (int)y - bandH, chartRect.Width, bandH * 2);
+                    // Line
+                    using (var pen = new Pen(CtrlHighColor, ZoneLineThick))
+                        g.DrawLine(pen, chartRect.Left, (int)y, chartRect.Right, (int)y);
+                    // Label
+                    using (var f = new Font("Consolas", LabelFontSize, FontStyle.Bold))
+                    using (var b = new SolidBrush(CtrlHighColor))
+                        g.DrawString("Controlling High", f, b, chartRect.Right - 140, y - LabelFontSize - 4);
+                }
+            }
+
+            // ── Controlling Low zone ───────────────────────────────────────
+            if (DrawCtrlLow && !double.IsNaN(_chartSnapshot.ControllingLow))
+            {
+                float y = (float)win.CoordinatesConverter.GetChartY(_chartSnapshot.ControllingLow);
+                if (y >= chartRect.Top && y <= chartRect.Bottom)
+                {
+                    int bandH = Math.Max(2, ZoneLineThick * 2);
+                    using (var fill = new SolidBrush(Color.FromArgb(ZoneFillAlpha, CtrlLowColor)))
+                        g.FillRectangle(fill, chartRect.Left, (int)y - bandH, chartRect.Width, bandH * 2);
+                    using (var pen = new Pen(CtrlLowColor, ZoneLineThick))
+                        g.DrawLine(pen, chartRect.Left, (int)y, chartRect.Right, (int)y);
+                    using (var f = new Font("Consolas", LabelFontSize, FontStyle.Bold))
+                    using (var b = new SolidBrush(CtrlLowColor))
+                        g.DrawString("Controlling Low", f, b, chartRect.Right - 130, y + 4);
+                }
+            }
+
+            // ── HH / HL / LH / LL labels ──────────────────────────────────
+            if (DrawLabels && _chartSnapshot.LegPivots != null)
+            {
+                using (var f = new Font("Consolas", LabelFontSize, FontStyle.Bold))
+                {
+                    foreach (var p in _chartSnapshot.LegPivots)
+                    {
+                        float y, x;
+                        try
+                        {
+                            y = (float)win.CoordinatesConverter.GetChartY(p.Price);
+                            x = (float)win.CoordinatesConverter.GetChartX(p.Time);
+                        }
+                        catch { continue; }
+
+                        if (x < chartRect.Left || x > chartRect.Right) continue;
+                        if (y < chartRect.Top  || y > chartRect.Bottom) continue;
+
+                        Color c = p.Label == "HH" ? HHColor :
+                                  p.Label == "LL" ? LLColor :
+                                  p.Label == "HL" ? HLColor : LHColor;
+
+                        using (var b = new SolidBrush(c))
+                        {
+                            // Diamond marker
+                            float dm = 4f;
+                            var diamond = new PointF[]
+                            {
+                                new PointF(x,      y - dm),
+                                new PointF(x + dm, y),
+                                new PointF(x,      y + dm),
+                                new PointF(x - dm, y)
+                            };
+                            g.FillPolygon(b, diamond);
+
+                            // Label above (bull) or below (bear) diamond
+                            float ly = p.IsBull ? y - dm - LabelFontSize - 2 : y + dm + 2;
+                            g.DrawString(p.Label, f, b, x - 8, ly);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Panel Drawing ──────────────────────────────────────────────────
+
         private void DrawPanel(Graphics g, Rectangle chartRect)
         {
-            // Count visible rows
             bool[] vis = TF_VISIBLE;
             int visibleRows = 0;
             for (int i = 0; i < TF_COUNT; i++)
@@ -284,45 +430,41 @@ namespace IOF_TrendLab
 
             if (visibleRows == 0) return;
 
-            int titleH     = ShowTitle ? RowHeight : 0;
+            int titleH      = ShowTitle ? RowHeight : 0;
             int panelHeight = visibleRows * RowHeight + titleH + 4;
-            int x          = chartRect.Left + PanelX;
-            int y          = chartRect.Top  + PanelY;
+            int x           = chartRect.Left + PanelX;
+            int y           = chartRect.Top  + PanelY;
 
-            // Background + border
             using (var bgBrush  = new SolidBrush(PanelBgColor))
                 g.FillRectangle(bgBrush, x, y, PanelWidth, panelHeight);
             using (var borderPen = new Pen(BorderColor))
                 g.DrawRectangle(borderPen, x, y, PanelWidth - 1, panelHeight - 1);
 
-            float  fSize    = Math.Max(6f, FontSize);
-            int    stateW   = PanelWidth - LabelColWidth - 8;
-            int    rowX     = x + 4;
-            int    stateX   = rowX + LabelColWidth;
-            int    curY     = y + 2;
+            float fSize  = Math.Max(6f, FontSize);
+            int   stateW = PanelWidth - LabelColWidth - 8;
+            int   rowX   = x + 4;
+            int   stateX = rowX + LabelColWidth;
+            int   curY   = y + 2;
 
             using (var labelFont = new Font("Consolas", fSize, FontStyle.Bold))
             using (var stateFont = new Font("Consolas", fSize, FontStyle.Bold))
             using (var titleFont = new Font("Consolas", fSize - 1f > 6f ? fSize - 1f : 6f, FontStyle.Bold))
             {
-                // Title bar
                 if (ShowTitle)
                 {
                     using (var titleBrush = new SolidBrush(TitleTextColor))
                     {
                         string title = "IOF TREND";
                         var sz = g.MeasureString(title, titleFont);
-                        float tx = x + (PanelWidth - sz.Width) / 2f;
-                        float ty = curY + (RowHeight - sz.Height) / 2f;
-                        g.DrawString(title, titleFont, titleBrush, tx, ty);
+                        g.DrawString(title, titleFont, titleBrush,
+                            x + (PanelWidth - sz.Width) / 2f,
+                            curY + (RowHeight - sz.Height) / 2f);
                     }
-                    // separator line
                     using (var sepPen = new Pen(BorderColor))
                         g.DrawLine(sepPen, x, curY + RowHeight, x + PanelWidth - 1, curY + RowHeight);
                     curY += RowHeight;
                 }
 
-                // Rows
                 for (int i = 0; i < TF_COUNT; i++)
                 {
                     if (!vis[i]) continue;
@@ -330,13 +472,11 @@ namespace IOF_TrendLab
                     int rowY = curY;
                     curY += RowHeight;
 
-                    // TF label
                     using (var lb = new SolidBrush(LabelTextColor))
                         g.DrawString(TF_LABELS[i], labelFont, lb, rowX, rowY + (RowHeight - FontSize) / 2f - 1);
 
-                    // Determine state
                     var snap    = _snapshots[i];
-                    bool loaded = _lastProcessedIdx != null && _lastProcessedIdx[i] >= WarmupBars;
+                    bool loaded = _lastProcessedIdx[i] >= WarmupBars;
                     TrendState state = snap != null ? snap.State : TrendState.Flat;
 
                     Color  bgColor;
@@ -351,39 +491,26 @@ namespace IOF_TrendLab
                     {
                         switch (state)
                         {
-                            case TrendState.Bull:
-                                bgColor    = BullColor;
-                                stateLabel = "BULL";
-                                break;
-                            case TrendState.Bear:
-                                bgColor    = BearColor;
-                                stateLabel = "BEAR";
-                                break;
-                            default:
-                                bgColor    = FlatColor;
-                                stateLabel = "FLAT";
-                                break;
+                            case TrendState.Bull: bgColor = BullColor; stateLabel = "BULL"; break;
+                            case TrendState.Bear: bgColor = BearColor; stateLabel = "BEAR"; break;
+                            default:              bgColor = FlatColor;  stateLabel = "FLAT"; break;
                         }
                     }
 
-                    // State background box
                     using (var stateBg = new SolidBrush(bgColor))
                         g.FillRectangle(stateBg, stateX, rowY + 1, stateW, RowHeight - 3);
 
-                    // State label — centered in box, or left-aligned if showing control price
                     using (var stBrush = new SolidBrush(StateTextColor))
                     {
                         if (ShowControlPrice && loaded && state != TrendState.Flat && snap != null
                             && !double.IsNaN(snap.ControllingPivotPrice))
                         {
-                            // Left: state label, Right: control price
                             string priceStr = snap.ControllingPivotPrice.ToString("F2");
-                            var    labSz    = g.MeasureString(stateLabel, stateFont);
-                            var    priceSz  = g.MeasureString(priceStr, stateFont);
-                            float  ly       = rowY + (RowHeight - labSz.Height) / 2f;
-                            float  py       = rowY + (RowHeight - priceSz.Height) / 2f;
+                            var labSz  = g.MeasureString(stateLabel, stateFont);
+                            var priceSz = g.MeasureString(priceStr, stateFont);
+                            float ly = rowY + (RowHeight - labSz.Height)  / 2f;
+                            float py = rowY + (RowHeight - priceSz.Height) / 2f;
                             g.DrawString(stateLabel, stateFont, stBrush, stateX + 3, ly);
-                            // price right-aligned
                             float px = stateX + stateW - priceSz.Width - 3;
                             if (px > stateX + labSz.Width + 4)
                                 g.DrawString(priceStr, stateFont, stBrush, px, py);
@@ -391,24 +518,20 @@ namespace IOF_TrendLab
                         else
                         {
                             var sz = g.MeasureString(stateLabel, stateFont);
-                            float sx = stateX + (stateW - sz.Width)  / 2f;
-                            float sy = rowY  + (RowHeight - sz.Height) / 2f;
-                            g.DrawString(stateLabel, stateFont, stBrush, sx, sy);
+                            g.DrawString(stateLabel, stateFont, stBrush,
+                                stateX + (stateW - sz.Width)   / 2f,
+                                rowY   + (RowHeight - sz.Height) / 2f);
                         }
                     }
 
-                    // Bar count badge (debug/tuning aid)
                     if (ShowBarCount && loaded)
                     {
                         string cnt = _lastProcessedIdx[i].ToString();
                         using (var cntBrush = new SolidBrush(Color.FromArgb(120, 120, 120)))
                         using (var cntFont  = new Font("Consolas", Math.Max(6f, fSize - 2f)))
-                        {
                             g.DrawString(cnt, cntFont, cntBrush, rowX, rowY + RowHeight - cntFont.Height - 1);
-                        }
                     }
 
-                    // Row separator
                     using (var sepPen = new Pen(Color.FromArgb(40, 80, 80, 80)))
                         g.DrawLine(sepPen, x + 1, rowY + RowHeight - 1, x + PanelWidth - 2, rowY + RowHeight - 1);
                 }

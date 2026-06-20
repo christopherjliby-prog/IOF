@@ -1,22 +1,10 @@
 // TrendStateMachine.cs — Leg-based trend engine per Mr. Black's methodology.
 //
-// A "leg" is a continuous run of same-direction candle closes until the
-// opposite direction breaks it (bear candle close < prior close ends a bull
-// leg; bull candle close > prior close ends a bear leg). Doji continues.
-//
-// Three alternating legs = one complete structure:
-//   Bull: bull-leg → bear-leg → bull-leg  where leg3.High > leg1.High (HH)
-//   Bear: bear-leg → bull-leg → bear-leg  where leg3.Low  < leg1.Low  (LL)
-//
-// Dual control points (both active simultaneously):
-//   ControllingHigh = HH of the most recent completed bull structure (only rises)
-//   ControllingLow  = LL of the most recent completed bear structure (only falls)
-//
-// State:
-//   BULL  — close > ControllingHigh
-//   BEAR  — close < ControllingLow
-//   FLAT  — between both (or before any structure forms)
-//   No direct Bull→Bear flip. Must pass through FLAT.
+// A "leg" = continuous run of same-direction closes until the opposite direction
+// breaks it. Three alternating legs = one structure.
+// Dual control points: ControllingHigh (HH from bull structures, only rises)
+//                      ControllingLow  (LL from bear structures, only falls)
+// FLAT when price is between both. No direct Bull→Bear flip.
 
 using System;
 using System.Collections.Generic;
@@ -25,24 +13,33 @@ namespace TradePhantomsIOF.Trend
 {
     public enum TrendState { Flat = 0, Bull = 1, Bear = 2 }
 
-    // ── Kept for backward compatibility with IOF_TrendLab.cs ─────────────────
+    // ── Backward-compat stubs ─────────────────────────────────────────────────
     public enum CandleDirection { Bullish = 1, Bearish = -1, Doji = 0 }
     public class ControlPoint  { public double Price; public TrendState Direction; public DateTime Time; public int BarIndex; public double EngulfingHigh; public double EngulfingLow; public double EngulfingOpen; public double EngulfingClose; }
     public class TrendBreakEvent { public DateTime Time; public int BarIndex; public TrendState OldTrend; public TrendState NewTrend; public double BrokenControlPoint; public double BreakBarClose; }
-    public class SwingPivot     { public DateTime Time; public int BarIndex; public double Price; public bool IsHigh; public bool IsControllingPivot; }
+    public class SwingPivot { public DateTime Time; public int BarIndex; public double Price; public bool IsHigh; public bool IsControllingPivot; }
+
+    // ── Leg pivot exposed for chart drawing ───────────────────────────────────
+    public class LegPivot
+    {
+        public DateTime Time;    // time when extreme close was set
+        public double   Price;   // extreme close price
+        public string   Label;   // "HH", "HL", "LH", "LL"
+        public bool     IsBull;  // true = bull leg (HH or LH), false = bear leg (LL or HL)
+    }
 
     public class TrendSnapshot
     {
-        public TrendState   State;
-        public double       ControllingHigh  = double.NaN;
-        public double       ControllingLow   = double.NaN;
-        public ControlPoint CurrentControlPoint;
+        public TrendState          State;
+        public double              ControllingHigh = double.NaN;
+        public double              ControllingLow  = double.NaN;
+        public List<LegPivot>      LegPivots       = new List<LegPivot>();
+        public ControlPoint        CurrentControlPoint;
         public List<SwingPivot>    RecentPivots        = new List<SwingPivot>();
         public List<ControlPoint>  RecentControlPoints = new List<ControlPoint>();
         public TrendBreakEvent     LastBreak;
-        public DateTime     LastUpdated;
+        public DateTime            LastUpdated;
 
-        // Panel uses this for the price display in the state box
         public double ControllingPivotPrice =>
             State == TrendState.Bull ? ControllingLow  :
             State == TrendState.Bear ? ControllingHigh :
@@ -50,119 +47,147 @@ namespace TradePhantomsIOF.Trend
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // INTERNAL: sealed directional leg
-    // ─────────────────────────────────────────────────────────────────────────
-
     internal sealed class Leg
     {
-        public int    Direction;  // +1 bull, -1 bear
-        public double Extreme;    // highest close (bull) or lowest close (bear) during this leg
-        public double StartClose;
-        public double EndClose;
+        public int      Direction;    // +1 bull, -1 bear
+        public double   Extreme;      // highest close (bull) or lowest close (bear)
+        public DateTime ExtremeTime;  // bar time when extreme was set
+        public double   StartClose;
+        public double   EndClose;
+        public DateTime StartTime;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // TREND STATE MACHINE
-    // ─────────────────────────────────────────────────────────────────────────
-
     public class TrendStateMachine
     {
-        // ── Compatibility properties (ignored in leg engine) ──────────────────
+        // ── Compat props (ignored in leg engine) ──────────────────────────────
         public int  SwingFractalLookback            = 3;
         public int  RequireSegments                 = 3;
         public bool RequireEngulfingForControlPoint = false;
         public int  MaxPivotHistory                 = 50;
 
-        // ── Public state ──────────────────────────────────────────────────────
         public TrendState CurrentState { get; private set; } = TrendState.Flat;
 
-        // ── Events (compatibility) ────────────────────────────────────────────
-        public event Action<ControlPoint>             OnControlPointDetected;
-        public event Action<TrendBreakEvent>          OnTrendBroken;
-        public event Action<TrendState, TrendState>   OnTrendStateChanged;
+        public event Action<ControlPoint>           OnControlPointDetected;
+        public event Action<TrendBreakEvent>        OnTrendBroken;
+        public event Action<TrendState, TrendState> OnTrendStateChanged;
 
         // ── Active leg ────────────────────────────────────────────────────────
-        private int    _legDir     = 0;
-        private double _legExtreme = double.NaN;
-        private double _legStart   = double.NaN;
-        private double _lastClose  = double.NaN;
+        private int      _legDir     = 0;
+        private double   _legExtreme = double.NaN;
+        private DateTime _legExtremeTime;
+        private double   _legStart   = double.NaN;
+        private DateTime _legStartTime;
+        private double   _lastClose  = double.NaN;
 
         // ── Completed legs ────────────────────────────────────────────────────
-        private readonly List<Leg> _legs = new List<Leg>();
+        private readonly List<Leg>      _legs     = new List<Leg>();
+        private readonly List<LegPivot> _pivots   = new List<LegPivot>();
 
         // ── Dual control points ───────────────────────────────────────────────
-        private double _ctrlHigh = double.NaN;  // HH from bull structures (only rises)
-        private double _ctrlLow  = double.NaN;  // LL from bear structures (only falls)
+        private double _ctrlHigh = double.NaN;
+        private double _ctrlLow  = double.NaN;
 
         // ─────────────────────────────────────────────────────────────────────
-        // PER-BAR ENTRY POINT
-        // ─────────────────────────────────────────────────────────────────────
-
         public void OnBarClose(int barIndex, DateTime time,
                                double open, double high, double low, double close,
                                double tickSize)
         {
-            // Initialize on first bar
             if (double.IsNaN(_lastClose))
             {
-                _lastClose  = close;
-                _legDir     = close >= open ? 1 : -1;
-                _legExtreme = close;
-                _legStart   = close;
+                _lastClose      = close;
+                _legDir         = close >= open ? 1 : -1;
+                _legExtreme     = close;
+                _legExtremeTime = time;
+                _legStart       = close;
+                _legStartTime   = time;
                 return;
             }
 
             TrendState oldState = CurrentState;
-
-            // Candle direction — doji continues current leg
             int dir = close > open ? 1 : close < open ? -1 : _legDir;
 
-            // Leg break: opposite candle that closes beyond the prior close
             bool broken = (_legDir ==  1 && dir == -1 && close < _lastClose)
                        || (_legDir == -1 && dir ==  1 && close > _lastClose);
 
             if (broken)
             {
-                // Seal completed leg
-                _legs.Add(new Leg
+                var leg = new Leg
                 {
-                    Direction  = _legDir,
-                    Extreme    = _legExtreme,
-                    StartClose = _legStart,
-                    EndClose   = _lastClose
-                });
+                    Direction   = _legDir,
+                    Extreme     = _legExtreme,
+                    ExtremeTime = _legExtremeTime,
+                    StartClose  = _legStart,
+                    EndClose    = _lastClose,
+                    StartTime   = _legStartTime
+                };
+                _legs.Add(leg);
                 if (_legs.Count > 20) _legs.RemoveAt(0);
 
-                // Check if the last 3 sealed legs form a valid structure
+                // Label this leg relative to the previous same-direction leg
+                AddLegPivot(leg);
+
                 UpdateControlPoints();
 
-                // Start new leg
-                _legDir     = dir;
-                _legExtreme = close;
-                _legStart   = close;
+                _legDir         = dir;
+                _legExtreme     = close;
+                _legExtremeTime = time;
+                _legStart       = close;
+                _legStartTime   = time;
             }
             else
             {
-                // Extend current leg extreme (tracks closes, not wicks)
-                _legExtreme = _legDir == 1
-                    ? Math.Max(_legExtreme, close)
-                    : Math.Min(_legExtreme, close);
+                bool newExtreme = (_legDir == 1 && close > _legExtreme)
+                               || (_legDir == -1 && close < _legExtreme);
+                if (newExtreme)
+                {
+                    _legExtreme     = close;
+                    _legExtremeTime = time;
+                }
             }
 
             _lastClose = close;
-
-            // Evaluate state against dual control points
             EvaluateState(close);
 
-            // Fire state change event if needed
             if (CurrentState != oldState && OnTrendStateChanged != null)
                 OnTrendStateChanged(oldState, CurrentState);
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // STRUCTURE DETECTION
-        // ─────────────────────────────────────────────────────────────────────
+        private void AddLegPivot(Leg leg)
+        {
+            // Find previous leg of same direction to determine HH/HL/LH/LL
+            Leg prevSame = null;
+            for (int i = _legs.Count - 2; i >= 0; i--)
+            {
+                if (_legs[i].Direction == leg.Direction) { prevSame = _legs[i]; break; }
+            }
 
+            string label;
+            if (leg.Direction == 1) // bull leg
+            {
+                if (prevSame == null)            label = "HH";
+                else if (leg.Extreme > prevSame.Extreme) label = "HH";
+                else                             label = "LH";
+            }
+            else // bear leg
+            {
+                if (prevSame == null)            label = "LL";
+                else if (leg.Extreme < prevSame.Extreme) label = "LL";
+                else                             label = "HL";
+            }
+
+            _pivots.Add(new LegPivot
+            {
+                Time  = leg.ExtremeTime,
+                Price = leg.Extreme,
+                Label = label,
+                IsBull = leg.Direction == 1
+            });
+            if (_pivots.Count > 60) _pivots.RemoveAt(0);
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
         private void UpdateControlPoints()
         {
             int n = _legs.Count;
@@ -172,52 +197,44 @@ namespace TradePhantomsIOF.Trend
             var b = _legs[n - 2];
             var c = _legs[n - 1];
 
-            // Bull structure: bull → bear → bull, C makes HH above A
             if (a.Direction == 1 && b.Direction == -1 && c.Direction == 1
                 && c.Extreme > a.Extreme)
             {
-                // Controlling high ratchets up with each new HH
                 if (double.IsNaN(_ctrlHigh) || c.Extreme > _ctrlHigh)
                     _ctrlHigh = c.Extreme;
             }
-            // Bear structure: bear → bull → bear, C makes LL below A
             else if (a.Direction == -1 && b.Direction == 1 && c.Direction == -1
                      && c.Extreme < a.Extreme)
             {
-                // Controlling low ratchets down with each new LL
                 if (double.IsNaN(_ctrlLow) || c.Extreme < _ctrlLow)
                     _ctrlLow = c.Extreme;
             }
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // STATE EVALUATION
-        // ─────────────────────────────────────────────────────────────────────
-
         private void EvaluateState(double close)
         {
             bool hasHigh = !double.IsNaN(_ctrlHigh);
             bool hasLow  = !double.IsNaN(_ctrlLow);
 
-            if (hasHigh && close > _ctrlHigh)
-                CurrentState = TrendState.Bull;
-            else if (hasLow && close < _ctrlLow)
-                CurrentState = TrendState.Bear;
-            else
-                CurrentState = TrendState.Flat;
+            if      (hasHigh && close > _ctrlHigh) CurrentState = TrendState.Bull;
+            else if (hasLow  && close < _ctrlLow)  CurrentState = TrendState.Bear;
+            else                                    CurrentState = TrendState.Flat;
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // PUBLIC INTERFACE
-        // ─────────────────────────────────────────────────────────────────────
-
-        public TrendSnapshot GetSnapshot() => new TrendSnapshot
+        public TrendSnapshot GetSnapshot()
         {
-            State           = CurrentState,
-            ControllingHigh = _ctrlHigh,
-            ControllingLow  = _ctrlLow,
-            LastUpdated     = DateTime.UtcNow
-        };
+            var pivotsCopy = new List<LegPivot>(_pivots);
+            return new TrendSnapshot
+            {
+                State           = CurrentState,
+                ControllingHigh = _ctrlHigh,
+                ControllingLow  = _ctrlLow,
+                LegPivots       = pivotsCopy,
+                LastUpdated     = DateTime.UtcNow
+            };
+        }
 
         public bool IsAlignedWithTrend(bool isLongZone)
         {
@@ -228,13 +245,14 @@ namespace TradePhantomsIOF.Trend
         public void Reset()
         {
             _legs.Clear();
-            _legDir     = 0;
-            _legExtreme = double.NaN;
-            _legStart   = double.NaN;
-            _lastClose  = double.NaN;
-            _ctrlHigh   = double.NaN;
-            _ctrlLow    = double.NaN;
-            CurrentState = TrendState.Flat;
+            _pivots.Clear();
+            _legDir         = 0;
+            _legExtreme     = double.NaN;
+            _legStart       = double.NaN;
+            _lastClose      = double.NaN;
+            _ctrlHigh       = double.NaN;
+            _ctrlLow        = double.NaN;
+            CurrentState    = TrendState.Flat;
         }
     }
 }
