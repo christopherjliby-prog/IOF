@@ -342,41 +342,21 @@ namespace IOF_TrendLab
             var win = this.CurrentChart?.MainWindow;
             if (win == null) return;
 
-            // ── Controlling High zone ──────────────────────────────────────
-            if (DrawCtrlHigh && !double.IsNaN(_chartSnapshot.ControllingHigh))
+            var conv = win.CoordinatesConverter;
+
+            // ── CP Boxes: draw each active control point as a rectangle ───
+            // Bearish CP box (red) — extended from its candle time to right edge
+            if (DrawCtrlHigh && _chartSnapshot.ActiveBearCP != null)
             {
-                float y = (float)win.CoordinatesConverter.GetChartY(_chartSnapshot.ControllingHigh);
-                if (y >= chartRect.Top && y <= chartRect.Bottom)
-                {
-                    // Fill zone (thin band)
-                    int bandH = Math.Max(2, ZoneLineThick * 2);
-                    using (var fill = new SolidBrush(Color.FromArgb(ZoneFillAlpha, CtrlHighColor)))
-                        g.FillRectangle(fill, chartRect.Left, (int)y - bandH, chartRect.Width, bandH * 2);
-                    // Line
-                    using (var pen = new Pen(CtrlHighColor, ZoneLineThick))
-                        g.DrawLine(pen, chartRect.Left, (int)y, chartRect.Right, (int)y);
-                    // Label
-                    using (var f = new Font("Consolas", LabelFontSize, FontStyle.Bold))
-                    using (var b = new SolidBrush(CtrlHighColor))
-                        g.DrawString("Controlling High", f, b, chartRect.Right - 140, y - LabelFontSize - 4);
-                }
+                var cp = _chartSnapshot.ActiveBearCP;
+                DrawCPBox(g, chartRect, conv, cp, CtrlHighColor, "Controlling High");
             }
 
-            // ── Controlling Low zone ───────────────────────────────────────
-            if (DrawCtrlLow && !double.IsNaN(_chartSnapshot.ControllingLow))
+            // Bullish CP box (green) — extended from its candle time to right edge
+            if (DrawCtrlLow && _chartSnapshot.ActiveBullCP != null)
             {
-                float y = (float)win.CoordinatesConverter.GetChartY(_chartSnapshot.ControllingLow);
-                if (y >= chartRect.Top && y <= chartRect.Bottom)
-                {
-                    int bandH = Math.Max(2, ZoneLineThick * 2);
-                    using (var fill = new SolidBrush(Color.FromArgb(ZoneFillAlpha, CtrlLowColor)))
-                        g.FillRectangle(fill, chartRect.Left, (int)y - bandH, chartRect.Width, bandH * 2);
-                    using (var pen = new Pen(CtrlLowColor, ZoneLineThick))
-                        g.DrawLine(pen, chartRect.Left, (int)y, chartRect.Right, (int)y);
-                    using (var f = new Font("Consolas", LabelFontSize, FontStyle.Bold))
-                    using (var b = new SolidBrush(CtrlLowColor))
-                        g.DrawString("Controlling Low", f, b, chartRect.Right - 130, y + 4);
-                }
+                var cp = _chartSnapshot.ActiveBullCP;
+                DrawCPBox(g, chartRect, conv, cp, CtrlLowColor, "Controlling Low");
             }
 
             // ── HH / HL / LH / LL labels ──────────────────────────────────
@@ -420,6 +400,53 @@ namespace IOF_TrendLab
                         }
                     }
                 }
+            }
+        }
+
+        private void DrawCPBox(Graphics g, Rectangle chartRect,
+                               dynamic conv,
+                               CPBox cp, Color color, string label)
+        {
+            float yHigh, yLow, xLeft;
+            try
+            {
+                yHigh = (float)conv.GetChartY(cp.High);
+                yLow  = (float)conv.GetChartY(cp.Low);
+                xLeft = (float)conv.GetChartX(cp.Time);
+            }
+            catch { return; }
+
+            // Clamp to chart area
+            xLeft = Math.Max(chartRect.Left, xLeft);
+            float xRight = chartRect.Right;
+            float yTop   = Math.Min(yHigh, yLow);
+            float yBot   = Math.Max(yHigh, yLow);
+
+            // Make sure at least partially visible
+            if (yTop > chartRect.Bottom || yBot < chartRect.Top) return;
+
+            float boxH = Math.Max(2f, yBot - yTop);
+
+            // Filled background
+            using (var fill = new SolidBrush(Color.FromArgb(ZoneFillAlpha, color)))
+                g.FillRectangle(fill, xLeft, yTop, xRight - xLeft, boxH);
+
+            // Border lines (top and bottom of box)
+            using (var pen = new Pen(color, ZoneLineThick))
+            {
+                g.DrawLine(pen, xLeft, yTop, xRight, yTop);
+                g.DrawLine(pen, xLeft, yBot, xRight, yBot);
+            }
+
+            // Label right-aligned
+            using (var f = new Font("Consolas", LabelFontSize, FontStyle.Bold))
+            using (var b = new SolidBrush(color))
+            {
+                var sz = g.MeasureString(label, f);
+                float lx = xRight - sz.Width - 4;
+                float ly = yTop - sz.Height - 2;
+                if (ly < chartRect.Top) ly = yTop + 2;
+                g.DrawString(label, f, b, lx, ly);
             }
         }
 
