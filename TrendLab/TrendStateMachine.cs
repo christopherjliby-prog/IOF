@@ -60,11 +60,16 @@ namespace TradePhantomsIOF.Trend
     // ─────────────────────────────────────────────────────────────────────────
     public class TrendStateMachine
     {
-        // ── Compat props (ignored in leg engine) ──────────────────────────────
+        // ── Compat props ──────────────────────────────────────────────────────
         public int  SwingFractalLookback            = 3;
         public int  RequireSegments                 = 3;
         public bool RequireEngulfingForControlPoint = false;
         public int  MaxPivotHistory                 = 50;
+
+        // ── Leg size filter ───────────────────────────────────────────────────
+        // A leg only seals if its extreme moved at least this many ticks from
+        // its start close. Filters out single-candle noise on choppy TFs.
+        public int MinLegTicks = 4;
 
         public TrendState CurrentState { get; private set; } = TrendState.Flat;
 
@@ -107,8 +112,15 @@ namespace TradePhantomsIOF.Trend
             TrendState oldState = CurrentState;
             int dir = close > open ? 1 : close < open ? -1 : _legDir;
 
-            bool broken = (_legDir ==  1 && dir == -1 && close < _lastClose)
-                       || (_legDir == -1 && dir ==  1 && close > _lastClose);
+            // Leg break requires: opposite candle closes beyond prior close AND
+            // the leg that's ending moved at least MinLegTicks from its start.
+            double minMove = MinLegTicks * tickSize;
+            bool legMoved = (_legDir == 1  && _legExtreme >= _legStart + minMove)
+                         || (_legDir == -1 && _legExtreme <= _legStart - minMove);
+
+            bool broken = legMoved
+                       && ((_legDir ==  1 && dir == -1 && close < _lastClose)
+                        || (_legDir == -1 && dir ==  1 && close > _lastClose));
 
             if (broken)
             {

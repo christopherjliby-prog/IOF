@@ -28,6 +28,9 @@ namespace IOF_TrendLab
         [InputParameter("Body-Close Tick Tolerance", 3, 0, 10, 1, 0)]
         public int BodyCloseTolerance = 0;
 
+        [InputParameter("Min Leg Size (ticks)", 4, 1, 100, 1, 0)]
+        public int MinLegTicks = 4;
+
         // ── History Depth Per Timeframe ────────────────────────────────────
 
         [InputParameter("History Days (Monthly)", 10, 30, 3650, 30, 0)]
@@ -223,7 +226,7 @@ namespace IOF_TrendLab
             _snapshots        = new TrendSnapshot[TF_COUNT];
             _tickSize         = this.Symbol?.TickSize ?? 0.25;
 
-            _chartMachine = new TrendStateMachine();
+            _chartMachine = new TrendStateMachine { MinLegTicks = MinLegTicks };
             _chartLastBar = -1;
 
             for (int i = 0; i < TF_COUNT; i++)
@@ -234,6 +237,7 @@ namespace IOF_TrendLab
                     SwingFractalLookback            = SwingLookback,
                     RequireEngulfingForControlPoint  = RequireEngulfing,
                     RequireSegments                  = RequireSegments,
+                    MinLegTicks                     = MinLegTicks,
                 };
 
                 try
