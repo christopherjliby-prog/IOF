@@ -28,8 +28,8 @@ namespace IOF_TrendLab
         [InputParameter("Body-Close Tick Tolerance", 3, 0, 10, 1, 0)]
         public int BodyCloseTolerance = 0;
 
-        [InputParameter("Min Leg Size (ticks)", 4, 1, 100, 1, 0)]
-        public int MinLegTicks = 4;
+        [InputParameter("Min Leg Size (ticks)", 4, 1, 500, 1, 0)]
+        public int MinLegTicks = 20;
 
         // ── History Depth Per Timeframe ────────────────────────────────────
 
