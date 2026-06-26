@@ -153,7 +153,7 @@ namespace TradePhantomsIOF.Trend
                     var zone = new IofZone
                     {
                         Formation     = formation,
-                      IsLong        = isDemand,
+                        IsLong        = isDemand,
                         BodyHi        = rect.BodyHi,
                         BodyLo        = rect.BodyLo,
                         WickHi        = rect.WickHi,
@@ -171,3 +171,124 @@ namespace TradePhantomsIOF.Trend
             ApplyInvalidations(bars, result);
             return result;
         }
+
+        // ── helpers ────────────────────────────────────────────────────────
+        private static bool IsValidBase(IReadOnlyList<HistoryItemBar> bars, int start, int end, double maxBodyPct)
+        {
+            for (int i = start; i <= end; i++)
+            {
+                var b = bars[i];
+                if (b == null) return false;
+                double range = b.High - b.Low;
+                if (range <= 0) return false;
+                if (Math.Abs(b.Close - b.Open) / range > maxBodyPct) return false;
+            }
+            return true;
+        }
+
+        private static LegDir ClassifyLeg(HistoryItemBar b, double maxBodyPct)
+        {
+            if (b == null) return LegDir.None;
+            double range = b.High - b.Low;
+            if (range <= 0) return LegDir.None;
+            if (Math.Abs(b.Close - b.Open) / range < maxBodyPct + 0.05) return LegDir.None;
+            if (b.Close > b.Open) return LegDir.Up;
+            if (b.Close < b.Open) return LegDir.Down;
+            return LegDir.None;
+        }
+
+        private static string ToFormation(LegDir legIn, LegDir legOut)
+        {
+            if (legIn == LegDir.Up   && legOut == LegDir.Up)   return "RBR"; // demand
+            if (legIn == LegDir.Down && legOut == LegDir.Up)   return "DBR"; // demand
+            if (legIn == LegDir.Up   && legOut == LegDir.Down) return "RBD"; // supply
+            if (legIn == LegDir.Down && legOut == LegDir.Down) return "DBD"; // supply
+            return null;
+        }
+
+        private class Rect { public double BodyHi, BodyLo, WickHi, WickLo; }
+
+        private static Rect BuildRect(IReadOnlyList<HistoryItemBar> bars, int start, int end, bool isDemand)
+        {
+            double hiBody = double.MinValue, loBody = double.MaxValue;
+            double hiWick = double.MinValue, loWick = double.MaxValue;
+            for (int i = start; i <= end; i++)
+            {
+                var b = bars[i];
+                if (b == null) return null;
+                double bh = Math.Max(b.Open, b.Close);
+                double bl = Math.Min(b.Open, b.Close);
+                if (bh > hiBody) hiBody = bh;
+                if (bl < loBody) loBody = bl;
+                if (b.High > hiWick) hiWick = b.High;
+                if (b.Low  < loWick) loWick = b.Low;
+            }
+            var r = new Rect { BodyHi = hiBody, BodyLo = loBody };
+            if (isDemand) { r.WickHi = hiBody;  r.WickLo = loWick; }   // demand: bottom wick is the SL anchor
+            else          { r.WickHi = hiWick;  r.WickLo = loBody; }   // supply: top wick (Critical#1)
+            return r;
+        }
+
+        private static double MeasureMoveOut(IReadOnlyList<HistoryItemBar> bars, int endOfBase, bool isDemand)
+        {
+            int n = bars.Count;
+            int scanLimit = Math.Min(n - 1, endOfBase + 30);
+            var baseBar = bars[endOfBase];
+            if (baseBar == null) return 0.0;
+            double baseRange = baseBar.High - baseBar.Low;
+            if (baseRange <= 0) baseRange = Math.Abs(baseBar.Close - baseBar.Open);
+
+            double extreme = double.NaN;
+            for (int i = endOfBase + 1; i <= scanLimit; i++)
+            {
+                var b = bars[i];
+                if (b == null) break;
+                if (isDemand)
+                {
+                    if (double.IsNaN(extreme) || b.High > extreme) extreme = b.High;
+                    if (b.Close < baseBar.Close - baseRange) break;   // impulse ended
+                }
+                else
+                {
+                    if (double.IsNaN(extreme) || b.Low < extreme) extreme = b.Low;
+                    if (b.Close > baseBar.Close + baseRange) break;
+                }
+            }
+            if (double.IsNaN(extreme)) return 0.0;
+            return isDemand ? (extreme - baseBar.High) : (baseBar.Low - extreme);
+        }
+
+        private static bool IsDuplicate(List<IofZone> existing, IofZone c)
+        {
+            foreach (var z in existing)
+            {
+                if (z.IsLong != c.IsLong) continue;
+                double aTop = c.IsLong ? c.BodyHi : c.WickHi;
+                double aBot = c.IsLong ? c.WickLo : c.BodyLo;
+                double bTop = z.IsLong ? z.BodyHi : z.WickHi;
+                double bBot = z.IsLong ? z.WickLo : z.BodyLo;
+                double overlap = Math.Min(aTop, bTop) - Math.Max(aBot, bBot);
+                if (overlap <= 0) continue;
+                double union = Math.Max(aTop, bTop) - Math.Min(aBot, bBot);
+                if (union > 0 && overlap / union >= 0.75) return true;
+            }
+            return false;
+        }
+
+        private static void ApplyInvalidations(IReadOnlyList<HistoryItemBar> bars, List<IofZone> zones)
+        {
+            int n = bars.Count;
+            foreach (var zone in zones)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    var b = bars[i];
+                    if (b == null) continue;
+                    if (b.TimeLeft <= zone.BaseEndTime) continue;   // only bars after the base
+                    bool broken = zone.IsLong ? b.Close < zone.WickLo : b.Close > zone.WickHi;
+                    if (broken) { zone.Active = false; zone.InvalidatedAt = b.TimeLeft; break; }
+                }
+            }
+        }
+    }
+}
