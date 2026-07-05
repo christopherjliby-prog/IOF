@@ -1,0 +1,20 @@
+# Secrets / local config
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+secrets.*
+*credentials*
+appsettings.local.json
+
+# Build artifacts
+__pycache__/
+*.pyc
+bin/
+obj/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
