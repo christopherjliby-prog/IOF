@@ -83,9 +83,10 @@ Open `dashboard/index.html`. Ways to feed it:
 ## The JSON the bot writes
 
 Per account, rewritten on each trade close and on a short timer for live state.
-Real JSON has no comments — the annotations below are for reference. See
-[`iof_v2_dashboard_lucid.json`](./iof_v2_dashboard_lucid.json) and
-[`iof_v2_dashboard_mffu.json`](./iof_v2_dashboard_mffu.json) for working samples.
+Real JSON has no comments — the annotations below are for reference.
+[`iof_v2_dashboard_lucid.json`](./iof_v2_dashboard_lucid.json) is a single
+example file (the schema example from the spec); the bot writes one such file
+per account. No sample trade-log CSVs ship — the dashboard reads yours.
 
 ```jsonc
 {
@@ -153,8 +154,8 @@ can't list a directory, so it reads this index of the files to load:
 
 ```json
 {
-  "accounts": ["iof_v2_dashboard_lucid.json", "iof_v2_dashboard_mffu.json"],
-  "tradelogs": ["iof_v2_tradelog_lucid.csv", "iof_v2_tradelog_mffu.csv"]
+  "accounts": ["iof_v2_dashboard_<account>.json", "..."],
+  "tradelogs": ["iof_v2_tradelog_<account>.csv", "..."]
 }
 ```
 

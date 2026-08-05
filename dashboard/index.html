@@ -711,7 +711,6 @@
     }
     let files=[], logs=[];
     try{ const r=await fetch("./accounts.json",{cache:"no-store"}); if(r.ok){ const m=await r.json(); files=m.accounts||[]; logs=m.tradelogs||[]; } }catch(e){}
-    if(!files.length) files=["./iof_v2_dashboard_lucid.json","./iof_v2_dashboard_mffu.json"];
     let added=0;
     for(const fn of files){
       try{ const r=await fetch(fn,{cache:"no-store"}); if(!r.ok) continue; const raw=await r.text(); const data=JSON.parse(raw);
@@ -721,7 +720,6 @@
     if(added){ if(accounts.size>1) activeKey=ALL; startPolling(); renderTabs(); renderActive(); }
     else setStatus("","DISCONNECTED");
     // aggregate every trade log listed in the manifest
-    if(!logs.length) logs=["./iof_v2_tradelog_lucid.csv","./iof_v2_tradelog_mffu.csv"];
     let all=[];
     for(const fn of logs){ try{ const r=await fetch(fn,{cache:"no-store"}); if(r.ok) all=all.concat(parseCsv(await r.text())); }catch(e){} }
     if(all.length){ csvTrades=all; renderHistory(); }
