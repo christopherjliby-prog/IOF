@@ -36,8 +36,13 @@ margin, expectancy (R + $), avg win/loss, best/worst, max consecutive W/L.
 ZONE_INVALID, counts + %), avg winner MAE vs avg loser MAE (room-to-breathe),
 avg MFE, % of winners that hit full TP.
 
-**④ Risk guards** — daily-loss limit + remaining, profit-lock arm + distance /
-LOCKED state, giveback from peak, R value ($/R).
+**④ Risk guards** — two models, auto-selected per account:
+- **Funded (trailing drawdown)** — when the account JSON has a `funded` block
+  (both 50K accounts, Lucid + MyFunded Futures): distance to the trailing-stop
+  line, the stop level (and whether it has locked at your starting balance),
+  profit-target progress, account balance, peak, giveback, R value.
+- **Personal (daily-loss)** — fallback when there's no `funded` block: daily-loss
+  limit + remaining, profit-lock arm / LOCKED, giveback, R value.
 
 **⑤ Equity curve** — today's cumulative, toggle R / $.
 
@@ -90,6 +95,21 @@ Real JSON has no comments — the annotations below are for reference. See
   "planId": "lucid",              // stable key — used as the tab id
   "updatedUtc": "2026-08-05T11:10:49Z",  // change-detect signal; bump every write
   "dollarsPerR": 41.0,            // avg realized 1R in $, for display
+
+  // Funded-account risk model — EOD (end-of-day) drawdown. Omit this block for
+  // a personal account and the dashboard falls back to the daily-loss panel.
+  "funded": {
+    "firm": "Lucid",              // shown in the risk-panel header
+    "phase": "EVAL",              // EVAL | FUNDED
+    "drawdownType": "EOD",        // labels the meter; EOD line moves at close
+    "accountSizeUsd": 50000,      // 50K
+    "accountStartUsd": 50000,     // starting balance the line locks to
+    "maxDrawdownUsd": 2000,       // max-loss amount below the EOD peak
+    "profitTargetUsd": 3000,      // eval target; omit/null once FUNDED
+    "balanceUsd": 51850.0,        // current balance (bot writes this, live)
+    "eodPeakBalanceUsd": 52000.0, // highest END-OF-DAY balance — drives the line
+    "locksAtStart": true          // line freezes at accountStartUsd at breakeven
+  },
 
   "live": {
     "status": "WORKING",          // WORKING | STOPPED

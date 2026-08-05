@@ -6,6 +6,19 @@
   "updatedUtc": "2026-08-05T11:10:49Z",
   "dollarsPerR": 41.0,
 
+  "funded": {
+    "firm": "Lucid",
+    "phase": "EVAL",
+    "drawdownType": "EOD",
+    "accountSizeUsd": 50000,
+    "accountStartUsd": 50000,
+    "maxDrawdownUsd": 2000,
+    "profitTargetUsd": 3000,
+    "balanceUsd": 51850.0,
+    "eodPeakBalanceUsd": 52000.0,
+    "locksAtStart": true
+  },
+
   "live": {
     "status": "WORKING",
     "halt": "PROFIT_LOCK",

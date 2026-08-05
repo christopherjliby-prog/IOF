@@ -6,6 +6,19 @@
   "updatedUtc": "2026-08-05T11:10:51Z",
   "dollarsPerR": 62.5,
 
+  "funded": {
+    "firm": "MyFunded Futures",
+    "phase": "EVAL",
+    "drawdownType": "EOD",
+    "accountSizeUsd": 50000,
+    "accountStartUsd": 50000,
+    "maxDrawdownUsd": 2000,
+    "profitTargetUsd": 3000,
+    "balanceUsd": 51240.0,
+    "eodPeakBalanceUsd": 51300.0,
+    "locksAtStart": true
+  },
+
   "live": {
     "status": "WORKING",
     "halt": "NONE",
