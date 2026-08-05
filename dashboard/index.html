@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>IOF · Trade State Dashboard</title>
+<style>
+  :root {
+    --bg:#07080f; --bg-2:#0b0e1a;
+    --panel:rgba(16,20,38,0.72); --panel-2:rgba(255,255,255,0.03);
+    --panel-brd:rgba(90,120,200,0.22);
+    --grid:rgba(90,130,220,0.07);
+    --ink:#e8ecff; --ink-dim:#8b93b8; --ink-mute:#5a6288;
+    --cyan:#22d3ee; --cyan-glow:rgba(34,211,238,0.45);
+    --purple:#a855f7; --purp-glow:rgba(168,85,247,0.4);
+    --green:#3ddc84; --green-dim:rgba(61,220,132,0.14);
+    --red:#ff5470;   --red-dim:rgba(255,84,112,0.14);
+    --amber:#f5b544; --amber-dim:rgba(245,181,68,0.14);
+    --shadow:0 8px 40px rgba(0,0,0,0.5);
+    --mono:'SF Mono','JetBrains Mono','Fira Code',ui-monospace,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    font-family:var(--sans); color:var(--ink); min-height:100%;
+    padding:18px clamp(12px,2.6vw,36px) 60px; -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(1200px 600px at 82% -10%, rgba(168,85,247,0.10), transparent 60%),
+      radial-gradient(1000px 500px at 8% 110%, rgba(34,211,238,0.09), transparent 60%),
+      linear-gradient(180deg,var(--bg-2),var(--bg));
+    background-attachment:fixed;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:44px 44px;
+    mask-image:radial-gradient(ellipse 100% 80% at 50% 25%,#000 40%,transparent 100%);
+  }
+
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px;}
+  .brand{display:flex;align-items:center;gap:13px;}
+  .logo svg{width:40px;height:40px;filter:drop-shadow(0 0 6px var(--cyan-glow));}
+  .title h1{font-size:18px;font-weight:700;letter-spacing:.5px;background:linear-gradient(90deg,var(--cyan),var(--purple));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .title .sub{font-size:11px;color:var(--ink-mute);letter-spacing:2px;text-transform:uppercase;margin-top:2px;}
+  .conn{margin-left:auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+  .status-pill{display:inline-flex;align-items:center;gap:8px;font:600 11px/1 var(--mono);letter-spacing:.5px;padding:8px 12px;border-radius:999px;border:1px solid var(--panel-brd);background:var(--panel);color:var(--ink-dim);}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-mute);flex:none;}
+  .dot.live{background:var(--green);animation:pulse 1.8s infinite;}
+  .dot.stale{background:var(--amber);} .dot.err{background:var(--red);}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(61,220,132,.55);}70%{box-shadow:0 0 0 7px rgba(61,220,132,0);}100%{box-shadow:0 0 0 0 rgba(61,220,132,0);}}
+  button.btn{font:600 12px/1 var(--sans);color:var(--ink);padding:9px 14px;border-radius:10px;cursor:pointer;border:1px solid var(--panel-brd);background:linear-gradient(180deg,rgba(34,211,238,.14),rgba(168,85,247,.10));transition:transform .08s,box-shadow .2s,border-color .2s;}
+  button.btn:hover{transform:translateY(-1px);border-color:var(--cyan);box-shadow:0 0 18px rgba(34,211,238,.25);}
+  button.btn.ghost{background:var(--panel);}
+
+  /* account tabs */
+  .tabs{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:18px;}
+  .tab{display:flex;align-items:center;gap:9px;padding:9px 15px;border-radius:12px;cursor:pointer;border:1px solid var(--panel-brd);background:var(--panel);transition:.15s;user-select:none;}
+  .tab:hover{border-color:var(--cyan);}
+  .tab.on{border-color:var(--cyan);background:linear-gradient(180deg,rgba(34,211,238,.16),rgba(168,85,247,.10));box-shadow:0 0 16px rgba(34,211,238,.18);}
+  .tab .nm{font:700 13px/1 var(--sans);}
+  .tab .meta{font:600 10px/1 var(--mono);color:var(--ink-mute);letter-spacing:.5px;}
+  .tab .pnl{font:700 12px/1 var(--mono);margin-left:2px;}
+  .tab.add{color:var(--ink-dim);font-weight:700;}
+
+  .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:15px;margin-bottom:15px;}
+  .panel{background:var(--panel);border:1px solid var(--panel-brd);border-radius:16px;padding:16px 18px;backdrop-filter:blur(10px);box-shadow:var(--shadow);position:relative;overflow:hidden;}
+  .panel::after{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cyan-glow),var(--purp-glow),transparent);opacity:.55;}
+  .panel h2{font:700 11px/1 var(--mono);letter-spacing:2.5px;text-transform:uppercase;color:var(--ink-dim);margin-bottom:14px;display:flex;align-items:center;gap:8px;}
+  .panel h2 .tag{margin-left:auto;font-size:10px;letter-spacing:1px;color:var(--ink-mute);text-transform:none;font-weight:600;}
+  .col-3{grid-column:span 3;} .col-4{grid-column:span 4;} .col-5{grid-column:span 5;}
+  .col-6{grid-column:span 6;} .col-7{grid-column:span 7;} .col-8{grid-column:span 8;} .col-12{grid-column:span 12;}
+  @media(max-width:1100px){.col-3,.col-4,.col-5,.col-7,.col-8{grid-column:span 6;}}
+  @media(max-width:720px){.grid>*{grid-column:span 12!important;}}
+
+  /* live state */
+  .live-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
+  .state-badge{font:800 14px/1 var(--sans);letter-spacing:1px;padding:8px 14px;border-radius:10px;}
+  .s-working{color:var(--green);background:var(--green-dim);box-shadow:inset 0 0 0 1px rgba(61,220,132,.3);}
+  .s-stopped{color:var(--red);background:var(--red-dim);box-shadow:inset 0 0 0 1px rgba(255,84,112,.3);}
+  .chip{font:700 11px/1 var(--mono);letter-spacing:.5px;padding:7px 11px;border-radius:8px;border:1px solid transparent;}
+  .c-green{color:var(--green);background:var(--green-dim);} .c-red{color:var(--red);background:var(--red-dim);}
+  .c-amber{color:var(--amber);background:var(--amber-dim);} .c-cyan{color:var(--cyan);background:rgba(34,211,238,.12);}
+  .c-gray{color:var(--ink-dim);background:rgba(255,255,255,.05);}
+  .pos-card{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:10px;padding:14px;border-radius:12px;background:var(--panel-2);border:1px solid var(--panel-brd);}
+  .pos-card.flat{text-align:center;color:var(--ink-mute);padding:22px;font-weight:600;grid-template-columns:1fr;}
+  .mini{}
+  .mini .l{font:600 9.5px/1 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--ink-mute);}
+  .mini .v{font:700 17px/1.1 var(--sans);margin-top:6px;font-variant-numeric:tabular-nums;}
+
+  /* tiles */
+  .tiles{display:grid;grid-template-columns:repeat(6,1fr);gap:11px;}
+  @media(max-width:900px){.tiles{grid-template-columns:repeat(3,1fr);}}
+  @media(max-width:520px){.tiles{grid-template-columns:repeat(2,1fr);}}
+  .tile{background:linear-gradient(180deg,var(--panel-2),transparent);border:1px solid var(--panel-brd);border-radius:12px;padding:12px 13px;position:relative;overflow:hidden;}
+  .tile .lbl{font:600 9.5px/1.1 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--ink-mute);}
+  .tile .val{font:700 21px/1.05 var(--sans);margin-top:8px;letter-spacing:.2px;font-variant-numeric:tabular-nums;}
+  .tile .val small{font-size:12px;color:var(--ink-dim);font-weight:600;}
+  .tile .sub2{font:600 10px/1.2 var(--mono);color:var(--ink-mute);margin-top:5px;}
+  .tile .spark{margin-top:8px;height:3px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden;}
+  .tile .spark>span{display:block;height:100%;border-radius:3px;}
+  .pos{color:var(--green);} .neg{color:var(--red);} .neu{color:var(--cyan);} .warn{color:var(--amber);}
+
+  /* meters (risk) */
+  .meter{margin:6px 0 14px;}
+  .meter .hd{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px;}
+  .meter .hd .k{font:600 11px/1 var(--sans);color:var(--ink-dim);}
+  .meter .hd .v{font:700 13px/1 var(--mono);font-variant-numeric:tabular-nums;}
+  .track{height:9px;border-radius:6px;background:rgba(255,255,255,.06);overflow:hidden;position:relative;}
+  .track>span{display:block;height:100%;border-radius:6px;transition:width .4s;}
+  .meter .cap{font:600 10px/1.2 var(--mono);color:var(--ink-mute);margin-top:5px;}
+
+  /* exit quality */
+  .exit-row{display:grid;grid-template-columns:120px 1fr 62px;gap:10px;align-items:center;padding:6px 0;}
+  .exit-row .nm{font:600 11.5px/1 var(--sans);color:var(--ink-dim);}
+  .exit-row .bar{height:16px;border-radius:5px;background:rgba(255,255,255,.05);overflow:hidden;}
+  .exit-row .bar>span{display:block;height:100%;border-radius:5px;}
+  .exit-row .ct{font:700 11px/1 var(--mono);text-align:right;color:var(--ink-dim);}
+  .kv{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(90,120,200,.08);font-size:12.5px;}
+  .kv:last-child{border-bottom:none;} .kv .k{color:var(--ink-dim);font-size:12px;} .kv .v{font-weight:700;font-variant-numeric:tabular-nums;}
+
+  svg.equity{width:100%;height:210px;display:block;overflow:visible;}
+  .empty{color:var(--ink-mute);font:500 13px/1.5 var(--sans);text-align:center;padding:26px 10px;}
+  .seg{display:inline-flex;border:1px solid var(--panel-brd);border-radius:9px;overflow:hidden;}
+  .seg button{font:700 10px/1 var(--mono);letter-spacing:.5px;padding:7px 11px;background:transparent;color:var(--ink-dim);border:none;cursor:pointer;}
+  .seg button.on{background:rgba(34,211,238,.16);color:var(--cyan);}
+
+  footer{margin-top:24px;text-align:center;color:var(--ink-mute);font:500 11px/1.6 var(--mono);letter-spacing:.5px;}
+  code{color:var(--cyan);font-family:var(--mono);}
+  .setup{display:flex;flex-direction:column;align-items:center;gap:13px;padding:22px 10px;}
+  .setup p{color:var(--ink-dim);font-size:13px;text-align:center;max-width:520px;line-height:1.6;}
+  .setup .row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;}
+  input.url{font:500 12px/1 var(--mono);color:var(--ink);background:var(--bg-2);border:1px solid var(--panel-brd);border-radius:9px;padding:9px 12px;width:280px;}
+  .hint{font-size:11px;color:var(--ink-mute);}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 48 48" fill="none">
+        <circle cx="24" cy="24" r="9" stroke="#22d3ee" stroke-width="1.6"/>
+        <ellipse cx="24" cy="24" rx="21" ry="8" stroke="#a855f7" stroke-width="1.4" transform="rotate(32 24 24)"/>
+        <ellipse cx="24" cy="24" rx="21" ry="8" stroke="#22d3ee" stroke-width="1.4" transform="rotate(-32 24 24)"/>
+        <circle cx="24" cy="24" r="3" fill="#e8ecff"/></svg></div>
+      <div class="title"><h1>IOF TRADE STATE</h1><div class="sub" id="subline">awaiting feed</div></div>
+    </div>
+    <div class="conn">
+      <span class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">DISCONNECTED</span></span>
+      <button class="btn" id="btnAdd">+ Account file</button>
+      <button class="btn ghost" id="btnCsv">Load trade-log CSV</button>
+    </div>
+  </header>
+
+  <div class="tabs" id="tabs"></div>
+
+  <!-- setup card -->
+  <div class="grid" id="setupWrap">
+    <div class="panel col-12">
+      <h2>Connect a trade feed</h2>
+      <div class="setup">
+        <p>Point this at the <code>iof_v2_dashboard_&lt;account&gt;.json</code> your bot writes on each trade close and live timer.
+           Add one file per account — the tabs above let you switch, plus an <b>All accounts</b> roll-up.
+           Load your <code>trade_log.csv</code> for week &amp; all-time aggregates.</p>
+        <div class="row">
+          <button class="btn" id="btnPick">📂 Open live account file</button>
+          <button class="btn ghost" id="btnUpload">⬆ Upload snapshot</button>
+        </div>
+        <div class="row">
+          <input class="url" id="urlInput" placeholder="…or poll a URL  (./iof_v2_dashboard_lucid.json)" value="./iof_v2_dashboard_lucid.json" />
+          <button class="btn ghost" id="btnUrl">Poll URL</button>
+        </div>
+        <div class="hint" id="setupHint">“Open live file” keeps reading the same file as your bot rewrites it (Chrome/Edge).</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- dashboard -->
+  <div id="dash" style="display:none">
+    <div class="grid">
+      <div class="panel col-8"><h2>Live State <span class="tag" id="liveTag"></span></h2><div id="liveBody"></div></div>
+      <div class="panel col-4"><h2>Risk Guards <span class="tag" id="riskTag"></span></h2><div id="riskBody"></div></div>
+    </div>
+    <div class="grid">
+      <div class="panel col-12"><h2>Today’s Edge <span class="tag" id="edgeTag"></span></h2><div class="tiles" id="edgeTiles"></div></div>
+    </div>
+    <div class="grid">
+      <div class="panel col-7"><h2>Equity Curve <span class="tag"><span class="seg" id="eqSeg"><button data-u="R" class="on">R</button><button data-u="USD">$</button></span></span></h2><div id="eqWrap"></div></div>
+      <div class="panel col-5"><h2>Exit &amp; Execution Quality <span class="tag" id="exitTag"></span></h2><div id="exitBody"></div></div>
+    </div>
+    <div class="grid">
+      <div class="panel col-12">
+        <h2>All-Time &amp; Rolling <span class="tag"><span class="seg" id="histSeg"><button data-w="week" class="on">WEEK</button><button data-w="all">ALL-TIME</button></span></span></h2>
+        <div id="histBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>IOF Trade State Dashboard · live JSON + trade-log CSV · <span id="footLast">no data yet</span></footer>
+
+  <input type="file" id="fileInput" accept="application/json,.json" style="display:none" />
+  <input type="file" id="csvInput" accept=".csv,text/csv" style="display:none" />
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id)=>document.getElementById(id);
+  const POLL_MS = 2000;
+  const ALL = "__ALL__";
+
+  // ---- state ----
+  const accounts = new Map();  // key -> {key,label,source:{mode,handle,url},data,lastGood,sig}
+  let activeKey = null;
+  let csvTrades = null;        // parsed CSV rows
+  let eqUnit = "R";
+  let histWindow = "week";
+  let timer = null;
+
+  // ---- formatters ----
+  const F = {
+    n:(v,d=2)=>(v==null||isNaN(v))?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}),
+    usd:(v,d=0)=>(v==null||isNaN(v))?"—":(v<0?"-$":"$")+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}),
+    r:(v,d=2)=>(v==null||isNaN(v))?"—":(v>=0?"+":"")+Number(v).toFixed(d)+"R",
+    pct:(v,d=1)=>(v==null||isNaN(v))?"—":Number(v).toFixed(d)+"%",
+    sPct:(v,d=1)=>(v==null||isNaN(v))?"—":(v>=0?"+":"")+Number(v).toFixed(d)+"%",
+    time:(t)=>{if(!t)return"—";const d=new Date(t);return isNaN(d)?"—":d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});},
+    date:(t)=>{if(!t)return"—";const d=new Date(t);return isNaN(d)?"—":d.toLocaleDateString([],{month:"short",day:"numeric"});},
+  };
+  const cls=(v)=> v>0?"pos":v<0?"neg":"neu";
+  const esc=(s)=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+  // ============ aggregation ============
+  // Recompute an edge-stat block (same shape as `day`) from a list of trades.
+  function computeEdge(trades){
+    const wins=trades.filter(t=>t.r>0), losses=trades.filter(t=>t.r<0), scr=trades.filter(t=>t.r===0);
+    const sum=(a,f)=>a.reduce((s,x)=>s+f(x),0);
+    const netUsd=sum(trades,t=>t.usd), netR=sum(trades,t=>t.r);
+    const totWinUsd=sum(wins,t=>t.usd), totLossUsd=Math.abs(sum(losses,t=>t.usd));
+    const avgWinR=wins.length?sum(wins,t=>t.r)/wins.length:0;
+    const avgLossR=losses.length?Math.abs(sum(losses,t=>t.r))/losses.length:0;
+    const avgWinUsd=wins.length?totWinUsd/wins.length:0;
+    const avgLossUsd=losses.length?totLossUsd/losses.length:0;
+    const payoffR=avgLossR?avgWinR/avgLossR:0;
+    const winRatePct=trades.length?wins.length/trades.length*100:0;
+    const breakevenWrPct=(1+payoffR)?100/(1+payoffR):0;
+    const profitFactor=totLossUsd?totWinUsd/totLossUsd:(totWinUsd?Infinity:0);
+    // streaks
+    let mcl=0,mcw=0,cl=0,cw=0;
+    for(const t of trades){ if(t.r>0){cw++;cl=0;mcw=Math.max(mcw,cw);} else if(t.r<0){cl++;cw=0;mcl=Math.max(mcl,cl);} else {cl=0;cw=0;} }
+    // exits
+    const exits={};
+    for(const t of trades){ if(t.exit_reason) exits[t.exit_reason]=(exits[t.exit_reason]||0)+1; }
+    const wMae=wins.filter(t=>t.mae!=null), lMae=losses.filter(t=>t.mae!=null), aMfe=trades.filter(t=>t.mfe!=null);
+    const fullTp=wins.length?wins.filter(t=>t.exit_reason==="TARGET").length/wins.length*100:0;
+    return {
+      trades:trades.length, volume:sum(trades,t=>t.qty||0),
+      wins:wins.length, losses:losses.length, scratches:scr.length,
+      netUsd, netR, winRatePct, payoffR, profitFactor, breakevenWrPct,
+      edgeMarginPct:winRatePct-breakevenWrPct,
+      expectancyR:trades.length?netR/trades.length:0, expectancyUsd:trades.length?netUsd/trades.length:0,
+      avgWinR, avgLossR, avgWinUsd, avgLossUsd,
+      bestR:trades.length?Math.max(...trades.map(t=>t.r)):0, worstR:trades.length?Math.min(...trades.map(t=>t.r)):0,
+      maxConsecLosses:mcl, maxConsecWins:mcw, exits,
+      avgWinnerMaePts:wMae.length?sum(wMae,t=>t.mae)/wMae.length:null,
+      avgLoserMaePts:lMae.length?sum(lMae,t=>t.mae)/lMae.length:null,
+      avgMfePts:aMfe.length?sum(aMfe,t=>t.mfe)/aMfe.length:null,
+      winnersHitFullTpPct:fullTp,
+    };
+  }
+
+  // Combine multiple account snapshots into one aggregate view (All accounts).
+  function aggregateAccounts(list){
+    const days=list.map(a=>a.data&&a.data.day).filter(Boolean);
+    if(!days.length) return null;
+    const sum=(f)=>days.reduce((s,d)=>s+(f(d)||0),0);
+    const wins=sum(d=>d.wins), losses=sum(d=>d.losses), scr=sum(d=>d.scratches), trades=sum(d=>d.trades);
+    const totWinUsd=days.reduce((s,d)=>s+(d.avgWinUsd||0)*(d.wins||0),0);
+    const totLossUsd=days.reduce((s,d)=>s+(d.avgLossUsd||0)*(d.losses||0),0);
+    const winRW=days.reduce((s,d)=>s+(d.avgWinR||0)*(d.wins||0),0);
+    const lossRW=days.reduce((s,d)=>s+(d.avgLossR||0)*(d.losses||0),0);
+    const avgWinR=wins?winRW/wins:0, avgLossR=losses?lossRW/losses:0;
+    const payoffR=avgLossR?avgWinR/avgLossR:0;
+    const winRatePct=trades?wins/trades*100:0;
+    const breakevenWrPct=(1+payoffR)?100/(1+payoffR):0;
+    const exits={};
+    for(const d of days){ for(const k in (d.exits||{})) exits[k]=(exits[k]||0)+d.exits[k]; }
+    const w=(f,cntf)=>{let n=0,dn=0;for(const d of days){const c=cntf(d)||0;if(f(d)!=null){n+=f(d)*c;dn+=c;}}return dn?n/dn:null;};
+    const netUsd=sum(d=>d.netUsd), netR=sum(d=>d.netR);
+    return {
+      date:days[0].date, trades, volume:sum(d=>d.volume), wins, losses, scratches:scr,
+      netUsd, netR, peakUsd:sum(d=>d.peakUsd), peakR:sum(d=>d.peakR), givebackFromPeakUsd:sum(d=>d.givebackFromPeakUsd),
+      winRatePct, payoffR, profitFactor: totLossUsd?totWinUsd/totLossUsd:(totWinUsd?Infinity:0),
+      breakevenWrPct, edgeMarginPct:winRatePct-breakevenWrPct,
+      expectancyR:trades?netR/trades:0, expectancyUsd:trades?netUsd/trades:0,
+      avgWinR, avgLossR, avgWinUsd:wins?totWinUsd/wins:0, avgLossUsd:losses?totLossUsd/losses:0,
+      bestR:Math.max(...days.map(d=>d.bestR||0)), worstR:Math.min(...days.map(d=>d.worstR||0)),
+      maxConsecLosses:Math.max(...days.map(d=>d.maxConsecLosses||0)), maxConsecWins:Math.max(...days.map(d=>d.maxConsecWins||0)),
+      exits, avgWinnerMaePts:w(d=>d.avgWinnerMaePts,d=>d.wins), avgLoserMaePts:w(d=>d.avgLoserMaePts,d=>d.losses),
+      avgMfePts:w(d=>d.avgMfePts,d=>d.trades), winnersHitFullTpPct:w(d=>d.winnersHitFullTpPct,d=>d.wins),
+    };
+  }
+
+  // Merge per-account equity curves into one combined cumulative curve.
+  function combinedEquity(list){
+    const deltas=[];
+    for(const a of list){
+      const c=(a.data&&a.data.equityCurve)||[]; let pu=0,pr=0;
+      c.forEach((p,i)=>{ deltas.push({t:p.t, du:(p.cumUsd||0)-pu, dr:(p.cumR||0)-pr}); pu=p.cumUsd||0; pr=p.cumR||0; });
+    }
+    deltas.sort((x,y)=>String(x.t).localeCompare(String(y.t)));
+    let cu=0,cr=0; const out=[{t:deltas[0]?deltas[0].t:null,cumUsd:0,cumR:0}];
+    for(const d of deltas){ cu+=d.du; cr+=d.dr; out.push({t:d.t,cumUsd:cu,cumR:cr}); }
+    return out;
+  }
+
+  // ============ renderers ============
+  function renderLive(view){
+    const L=view.live||{};
+    const stWork = String(L.status).toUpperCase()==="WORKING";
+    const haltMap={NONE:"c-green",PROFIT_LOCK:"c-cyan",DAILY_LOSS:"c-red",DISABLED:"c-gray"};
+    const gateMap={OFF:"c-gray",LONG_ONLY:"c-green",SHORT_ONLY:"c-red",NO_TRADE:"c-amber"};
+    const halt=String(L.halt||"NONE").toUpperCase(), gate=String(L.trendGate||"OFF").toUpperCase();
+    $("liveTag").textContent = view._isAll ? `${view._count} accounts` : `${esc(view.symbol||"")} · 1R = ${F.usd(view.dollarsPerR)}`;
+    if(view._isAll){
+      $("liveBody").innerHTML = view._roster; return;
+    }
+    let posHtml;
+    if(L.inPosition){
+      const long=String(L.side).toUpperCase()==="LONG";
+      posHtml=`<div class="pos-card">
+        <div class="mini"><div class="l">Side</div><div class="v ${long?'pos':'neg'}">${esc(L.side)}</div></div>
+        <div class="mini"><div class="l">Qty</div><div class="v">${L.qty??"—"}</div></div>
+        <div class="mini"><div class="l">Entry</div><div class="v">${F.n(L.entry)}</div></div>
+        <div class="mini"><div class="l">Unreal R</div><div class="v ${cls(L.unrealizedR)}">${F.r(L.unrealizedR)}</div></div>
+        <div class="mini"><div class="l">Unreal $</div><div class="v ${cls(L.unrealizedUsd)}">${F.usd(L.unrealizedUsd)}</div></div>
+        <div class="mini"><div class="l">Open MAE</div><div class="v warn">${F.n(L.openMaePts,2)}</div></div>
+        <div class="mini"><div class="l">Open MFE</div><div class="v neu">${F.n(L.openMfePts,2)}</div></div>
+      </div>`;
+    } else {
+      posHtml=`<div class="pos-card flat">FLAT · no open position</div>`;
+    }
+    $("liveBody").innerHTML=`
+      <div class="live-top">
+        <span class="state-badge ${stWork?'s-working':'s-stopped'}">${esc(L.status||"—")}</span>
+        <span class="chip ${haltMap[halt]||'c-gray'}">HALT · ${esc(halt)}</span>
+        <span class="chip ${gateMap[gate]||'c-gray'}">GATE · ${esc(gate)}</span>
+      </div>${posHtml}`;
+  }
+
+  function renderRisk(view){
+    if(view._isAll){ $("riskTag").textContent=""; $("riskBody").innerHTML=`<div class="empty">Select an account tab to see its risk guards.</div>`; return; }
+    const L=view.live||{}, D=view.day||{};
+    $("riskTag").textContent="live";
+    const lossLimit=L.dailyLossLimitUsd, lossRoom=L.distToDailyLossUsd;
+    const lossUsed=(lossLimit!=null&&lossRoom!=null)?lossLimit-lossRoom:null;
+    const lossPct=(lossLimit)?Math.max(0,Math.min(100,(lossUsed/lossLimit)*100)):0;
+    const lossColor=lossPct>75?"var(--red)":lossPct>50?"var(--amber)":"var(--green)";
+    const armAt=L.profitLockArmUsd, peak=D.peakUsd, gb=D.givebackFromPeakUsd;
+    const locked=String(L.halt).toUpperCase()==="PROFIT_LOCK";
+    const plPct=(armAt&&peak!=null)?Math.max(0,Math.min(100,(peak/armAt)*100)):0;
+    $("riskBody").innerHTML=`
+      <div class="meter">
+        <div class="hd"><span class="k">Daily loss limit</span><span class="v ${lossRoom<lossLimit*0.25?'neg':'neu'}">${F.usd(lossRoom)} left</span></div>
+        <div class="track"><span style="width:${lossPct}%;background:${lossColor}"></span></div>
+        <div class="cap">${F.usd(lossUsed)} used of ${F.usd(lossLimit)}</div>
+      </div>
+      <div class="meter">
+        <div class="hd"><span class="k">Profit lock ${locked?'· 🔒 LOCKED':''}</span><span class="v ${locked?'neu':''}">${locked?F.usd(peak):F.usd(L.distToProfitLockUsd)+' to arm'}</span></div>
+        <div class="track"><span style="width:${plPct}%;background:${locked?'var(--cyan)':'var(--purple)'}"></span></div>
+        <div class="cap">peak ${F.usd(peak)} · arms at ${F.usd(armAt)}</div>
+      </div>
+      <div class="kv"><span class="k">Giveback from peak</span><span class="v warn">${F.usd(gb)}</span></div>
+      <div class="kv"><span class="k">Room to daily loss</span><span class="v">${F.usd(lossRoom)}</span></div>
+      <div class="kv"><span class="k">R value</span><span class="v neu">${F.usd(view.dollarsPerR)} / R</span></div>`;
+  }
+
+  function tile(lbl,val,klass,sub,bar){
+    return `<div class="tile"><div class="lbl">${lbl}</div><div class="val ${klass||''}">${val}</div>
+      ${sub?`<div class="sub2">${sub}</div>`:""}
+      ${bar?`<div class="spark"><span style="width:${Math.max(0,Math.min(100,bar.pct))}%;background:${bar.color}"></span></div>`:""}</div>`;
+  }
+
+  function renderEdgeTiles(container, D, tagEl){
+    if(tagEl) tagEl.textContent = D.date ? D.date : "";
+    const pf = D.profitFactor===Infinity?"∞":F.n(D.profitFactor,2);
+    const html=[
+      tile("Net P&L", F.usd(D.netUsd), cls(D.netUsd), F.r(D.netR)),
+      tile("Win Rate", F.pct(D.winRatePct), "neu", `${D.wins||0}W · ${D.losses||0}L · ${D.scratches||0}S`, {pct:D.winRatePct,color:"var(--cyan)"}),
+      tile("Payoff (R)", F.n(D.payoffR,2), D.payoffR>=1?"pos":"warn", "avg win ÷ avg loss"),
+      tile("Profit Factor", pf, D.profitFactor>=1?"pos":"neg"),
+      tile("Breakeven WR", F.pct(D.breakevenWrPct), "neu", "need to profit", {pct:D.breakevenWrPct,color:"var(--purple)"}),
+      tile("Edge Margin", F.sPct(D.edgeMarginPct), D.edgeMarginPct>=0?"pos":"neg", "WR − breakeven"),
+      tile("Expectancy", F.usd(D.expectancyUsd), cls(D.expectancyUsd), `${F.r(D.expectancyR)} / trade`),
+      tile("Trades", `${D.trades||0}`, "neu", `${D.volume||0} contracts`),
+      tile("Avg Win", F.r(D.avgWinR), "pos", F.usd(D.avgWinUsd)),
+      tile("Avg Loss", F.r(-Math.abs(D.avgLossR)), "neg", F.usd(-Math.abs(D.avgLossUsd))),
+      tile("Best / Worst", F.r(D.bestR), D.bestR>=0?"pos":"neg", `worst ${F.r(D.worstR)}`),
+      tile("Max Streak", `${D.maxConsecWins||0}W`, "pos", `${D.maxConsecLosses||0}L in a row`),
+    ];
+    container.innerHTML=html.join("");
+  }
+
+  function renderExit(container, D, tagEl){
+    const ex=D.exits||{};
+    const order=["TARGET","STOP","ADVERSE_TAPE","ZONE_INVALID"];
+    const colors={TARGET:"var(--green)",STOP:"var(--red)",ADVERSE_TAPE:"var(--amber)",ZONE_INVALID:"var(--purple)"};
+    const total=order.reduce((s,k)=>s+(ex[k]||0),0)||1;
+    if(tagEl) tagEl.textContent=`${total} exits`;
+    const bars=order.map(k=>{
+      const c=ex[k]||0, p=c/total*100;
+      return `<div class="exit-row"><span class="nm">${k.replace("_"," ")}</span>
+        <div class="bar"><span style="width:${p}%;background:${colors[k]}"></span></div>
+        <span class="ct">${c} · ${p.toFixed(0)}%</span></div>`;
+    }).join("");
+    container.innerHTML=bars+`
+      <div style="margin-top:12px">
+        <div class="kv"><span class="k">Avg winner MAE <span style="color:var(--ink-mute)">(room to breathe)</span></span><span class="v pos">${F.n(D.avgWinnerMaePts,2)} pts</span></div>
+        <div class="kv"><span class="k">Avg loser MAE</span><span class="v neg">${F.n(D.avgLoserMaePts,2)} pts</span></div>
+        <div class="kv"><span class="k">Avg MFE</span><span class="v neu">${F.n(D.avgMfePts,2)} pts</span></div>
+        <div class="kv"><span class="k">Winners hit full TP</span><span class="v">${F.pct(D.winnersHitFullTpPct)}</span></div>
+      </div>`;
+  }
+
+  function renderEquity(container, curve, unit){
+    if(!curve||curve.length<2){ container.innerHTML=`<div class="empty">no closed trades yet today</div>`; return; }
+    const key=unit==="USD"?"cumUsd":"cumR";
+    const W=(container.clientWidth||660), H=210, padL=42, padR=14, padT=14, padB=24;
+    const vals=curve.map(p=>p[key]||0);
+    const xs=curve.length-1||1;
+    let lo=Math.min(0,...vals), hi=Math.max(0,...vals); if(lo===hi) hi=lo+1;
+    const X=i=>padL+(i/xs)*(W-padL-padR);
+    const Y=v=>padT+(1-(v-lo)/(hi-lo))*(H-padT-padB);
+    const line=curve.map((p,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Y(p[key]||0).toFixed(1)}`).join(" ");
+    const last=vals[vals.length-1], up=last>=0;
+    const stroke=up?"var(--green)":"var(--red)", glow=up?"rgba(61,220,132,.5)":"rgba(255,84,112,.5)";
+    const area=`${line} L${X(xs).toFixed(1)},${Y(lo).toFixed(1)} L${X(0).toFixed(1)},${Y(lo).toFixed(1)} Z`;
+    let grid="";
+    for(let g=0;g<=4;g++){ const yy=padT+(g/4)*(H-padT-padB); const val=hi-(g/4)*(hi-lo);
+      grid+=`<line x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}" stroke="rgba(90,130,220,0.08)"/>
+             <text x="${padL-6}" y="${yy+3}" fill="#5a6288" font-size="9" text-anchor="end" font-family="monospace">${unit==="USD"?"$"+val.toFixed(0):val.toFixed(1)}</text>`; }
+    const lbl=unit==="USD"?F.usd(last):F.r(last);
+    container.innerHTML=`<svg class="equity" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <defs><linearGradient id="eqf" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${up?'#3ddc84':'#ff5470'}" stop-opacity="0.28"/>
+        <stop offset="1" stop-color="${up?'#3ddc84':'#ff5470'}" stop-opacity="0"/></linearGradient></defs>
+      ${grid}
+      <line x1="${padL}" y1="${Y(0)}" x2="${W-padR}" y2="${Y(0)}" stroke="rgba(139,147,184,0.4)" stroke-dasharray="3 3"/>
+      <path d="${area}" fill="url(#eqf)"/>
+      <path d="${line}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" style="filter:drop-shadow(0 0 5px ${glow})"/>
+      <circle cx="${X(xs)}" cy="${Y(last)}" r="4" fill="${stroke}"/>
+      <text x="${X(xs)}" y="${Y(last)-9}" fill="${up?'#3ddc84':'#ff5470'}" font-size="11" font-weight="700" text-anchor="end" font-family="monospace">${lbl}</text>
+    </svg>`;
+  }
+
+  function renderHistory(){
+    const body=$("histBody");
+    if(!csvTrades){
+      body.innerHTML=`<div class="empty">Load your <code>trade_log.csv</code> (button top-right) to see week &amp; all-time edge stats and the full equity curve.</div>`;
+      return;
+    }
+    // filter by active account (unless All) and window
+    let rows=csvTrades.slice();
+    if(activeKey && activeKey!==ALL){
+      const acct=accounts.get(activeKey); const id=acct&&acct.data&&acct.data.account;
+      if(id) rows=rows.filter(r=>r.account===id);
+    }
+    if(histWindow==="week" && rows.length){
+      const maxT=Math.max(...rows.map(r=>r.ts));
+      const cut=maxT-7*864e5;
+      rows=rows.filter(r=>r.ts>=cut);
+    }
+    if(!rows.length){ body.innerHTML=`<div class="empty">No trades in the trade-log for this selection.</div>`; return; }
+    const D=computeEdge(rows);
+    // equity curve
+    let cu=0,cr=0; const curve=[{cumUsd:0,cumR:0}];
+    rows.slice().sort((a,b)=>a.ts-b.ts).forEach(t=>{ cu+=t.usd; cr+=t.r; curve.push({cumUsd:cu,cumR:cr}); });
+    body.innerHTML=`
+      <div class="grid" style="margin:0 0 14px">
+        <div class="col-7" style="padding:0"><div id="histEq"></div></div>
+        <div class="col-5" style="padding:0"><div id="histExit"></div></div>
+      </div>
+      <div class="tiles" id="histTiles" style="margin-top:4px"></div>`;
+    renderEquity($("histEq"), curve, eqUnit);
+    renderExit($("histExit"), D, null);
+    renderEdgeTiles($("histTiles"), D, null);
+  }
+
+  // build the active view object then render everything
+  function renderActive(){
+    const list=[...accounts.values()].filter(a=>a.data);
+    if(!list.length){ return; }
+    $("setupWrap").style.display="none"; $("dash").style.display="block";
+    let view;
+    if(activeKey===ALL){
+      const day=aggregateAccounts(list);
+      const roster=`<div class="pos-card" style="grid-template-columns:1fr">
+        ${list.map(a=>{const d=a.data.day||{};const L=a.data.live||{};
+          return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(90,120,200,.08)">
+            <span><b>${esc(a.data.label||a.key)}</b> <span style="color:var(--ink-mute);font:600 10px/1 var(--mono)">${esc(a.data.symbol||"")}</span>
+              <span class="chip ${String(L.status).toUpperCase()==='WORKING'?'c-green':'c-red'}" style="margin-left:8px;padding:3px 7px">${esc(L.status||'')}</span>
+              ${L.inPosition?`<span class="chip c-cyan" style="padding:3px 7px">IN ${esc(L.side||'')}</span>`:''}</span>
+            <span class="${cls(d.netUsd)}" style="font:700 13px/1 var(--mono)">${F.usd(d.netUsd)} · ${F.r(d.netR)}</span></div>`;}).join("")}
+      </div>`;
+      view={_isAll:true,_count:list.length,_roster:roster,live:{},day,dollarsPerR:null,
+            equityCurve:combinedEquity(list)};
+    } else {
+      const a=accounts.get(activeKey); if(!a||!a.data){ return; }
+      view=a.data;
+    }
+    renderLive(view);
+    renderRisk(view);
+    renderEdgeTiles($("edgeTiles"), view.day||{}, $("edgeTag"));
+    renderExit($("exitBody"), view.day||{}, $("exitTag"));
+    renderEquity($("eqWrap"), view.equityCurve, eqUnit);
+    renderHistory();
+    const anyD=view.day||{};
+    $("subline").textContent = activeKey===ALL ? `ALL ACCOUNTS · ${list.length} feeds` : `${esc(view.label||"")} · ${esc(view.account||"")} · ${esc(view.symbol||"")}`;
+  }
+
+  // ============ tabs ============
+  function renderTabs(){
+    const t=$("tabs"); t.innerHTML="";
+    const list=[...accounts.values()];
+    if(list.length>1){
+      const on=activeKey===ALL;
+      const agg=aggregateAccounts(list.filter(a=>a.data));
+      const el=document.createElement("div"); el.className="tab"+(on?" on":"");
+      el.innerHTML=`<span class="nm">All accounts</span>${agg?`<span class="pnl ${cls(agg.netUsd)}">${F.usd(agg.netUsd)}</span>`:""}`;
+      el.onclick=()=>{activeKey=ALL;renderTabs();renderActive();};
+      t.appendChild(el);
+    }
+    for(const a of list){
+      const on=activeKey===a.key; const d=a.data&&a.data.day;
+      const el=document.createElement("div"); el.className="tab"+(on?" on":"");
+      const dot=a.lastGood&&(Date.now()-a.lastGood<POLL_MS*3)?"live":(a.lastGood?"stale":"err");
+      el.innerHTML=`<span class="dot ${dot}"></span>
+        <span><span class="nm">${esc(a.data?a.data.label:a.key)}</span> <span class="meta">${esc(a.data?a.data.symbol:"")}</span></span>
+        ${d?`<span class="pnl ${cls(d.netUsd)}">${F.usd(d.netUsd)}</span>`:""}`;
+      el.onclick=()=>{activeKey=a.key;renderTabs();renderActive();};
+      t.appendChild(el);
+    }
+    if(list.length){
+      const add=document.createElement("div"); add.className="tab add"; add.innerHTML="+"; add.title="Add another account file";
+      add.onclick=connectHandle; t.appendChild(add);
+    }
+  }
+
+  // ============ connection ============
+  function setStatus(state,text){ $("statusDot").className="dot"+(state?" "+state:""); $("statusText").textContent=text; }
+
+  function sigOf(d,raw){ if(d&&d.updatedUtc) return "u:"+d.updatedUtc;
+    let h=0; for(let i=0;i<raw.length;i++){h=(h*31+raw.charCodeAt(i))|0;} return "h:"+h; }
+
+  function upsertAccount(data, source){
+    const key=data.planId||data.account||data.label||("acct"+accounts.size);
+    let a=accounts.get(key);
+    if(!a){ a={key,source,data:null,lastGood:0,sig:null}; accounts.set(key,a); if(!activeKey) activeKey=key; }
+    else if(source) a.source=source;
+    return a;
+  }
+
+  async function readSource(a){
+    try{
+      let raw;
+      if(a.source.mode==="handle"){ raw=await (await a.source.handle.getFile()).text(); }
+      else if(a.source.mode==="url"){ const r=await fetch(a.source.url,{cache:"no-store"}); if(!r.ok) throw new Error("HTTP "+r.status); raw=await r.text(); }
+      else return;
+      const data=JSON.parse(raw); const sig=sigOf(data,raw);
+      a.data=data; a.lastGood=Date.now();
+      if(sig!==a.sig){ a.sig=sig; if(activeKey===a.key||activeKey===ALL) renderActive(); renderTabs(); }
+      return true;
+    }catch(e){ console.warn("read failed",a.key,e.message); return false; }
+  }
+
+  function tick(){
+    const list=[...accounts.values()].filter(a=>a.source&&(a.source.mode==="handle"||a.source.mode==="url"));
+    Promise.all(list.map(readSource)).then(()=>{
+      const anyLive=list.some(a=>a.lastGood&&Date.now()-a.lastGood<POLL_MS*3);
+      const anyEver=list.some(a=>a.lastGood);
+      if(anyLive) setStatus("live","LIVE · "+list.length);
+      else if(anyEver) setStatus("stale","STALE");
+      else setStatus("err","READ ERROR");
+      renderTabs();
+      $("footLast").textContent="updated "+new Date().toLocaleTimeString();
+    });
+  }
+  function startPolling(){ if(timer) clearInterval(timer); tick(); timer=setInterval(tick,POLL_MS); }
+
+  async function connectHandle(){
+    if(!window.showOpenFilePicker){ alert("Live file access needs Chrome or Edge. Use Upload or Poll URL."); return; }
+    try{
+      const [h]=await window.showOpenFilePicker({types:[{description:"Trade JSON",accept:{"application/json":[".json"]}}]});
+      const raw=await (await h.getFile()).text(); const data=JSON.parse(raw);
+      const a=upsertAccount(data,{mode:"handle",handle:h}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,raw);
+      activeKey=a.key; startPolling(); renderTabs(); renderActive();
+    }catch(e){ if(e&&e.name!=="AbortError") console.warn(e); }
+  }
+  function connectUrl(){
+    const v=$("urlInput").value.trim(); if(!v) return;
+    fetch(v,{cache:"no-store"}).then(r=>r.ok?r.text():Promise.reject(new Error("HTTP "+r.status))).then(raw=>{
+      const data=JSON.parse(raw); const a=upsertAccount(data,{mode:"url",url:v}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,raw);
+      activeKey=a.key; startPolling(); renderTabs(); renderActive();
+    }).catch(e=>alert("Could not load "+v+": "+e.message));
+  }
+
+  // uploads (snapshot)
+  $("fileInput").addEventListener("change",e=>{
+    const f=e.target.files[0]; if(!f) return; const rd=new FileReader();
+    rd.onload=()=>{ try{ const data=JSON.parse(rd.result);
+      const a=upsertAccount(data,{mode:"upload"}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,rd.result);
+      activeKey=a.key; setStatus("stale","SNAPSHOT"); renderTabs(); renderActive();
+    }catch(err){ alert("Bad JSON: "+err.message);} };
+    rd.readAsText(f);
+  });
+
+  // CSV
+  function parseCsv(text){
+    const lines=text.trim().split(/\r?\n/); const head=lines[0].split(",").map(s=>s.trim().toLowerCase());
+    const idx=(n)=>head.indexOf(n);
+    const iT=idx("timestamp"),iA=idx("account"),iSd=idx("side"),iQ=idx("qty"),iEr=idx("exit_reason"),
+          iR=idx("pnl_r"),iU=idx("pnl_usd"),iM=idx("mae"),iF=idx("mfe");
+    const out=[];
+    for(let i=1;i<lines.length;i++){ const c=lines[i].split(","); if(c.length<3) continue;
+      out.push({ ts:Date.parse(c[iT]||""), account:iA>=0?c[iA]:"", side:iSd>=0?c[iSd]:"", qty:iQ>=0?+c[iQ]:0,
+        exit_reason:iEr>=0?c[iEr]:"", r:iR>=0?+c[iR]:0, usd:iU>=0?+c[iU]:0,
+        mae:iM>=0?+c[iM]:null, mfe:iF>=0?+c[iF]:null }); }
+    return out.filter(t=>!isNaN(t.ts));
+  }
+  $("csvInput").addEventListener("change",e=>{
+    const f=e.target.files[0]; if(!f) return; const rd=new FileReader();
+    rd.onload=()=>{ try{ csvTrades=parseCsv(rd.result); renderHistory(); }catch(err){ alert("CSV parse failed: "+err.message);} };
+    rd.readAsText(f);
+  });
+
+  // drag & drop (json or csv)
+  window.addEventListener("dragover",e=>e.preventDefault());
+  window.addEventListener("drop",e=>{ e.preventDefault(); const f=e.dataTransfer.files[0]; if(!f) return;
+    if(/\.csv$/i.test(f.name)){ $("csvInput").files=e.dataTransfer.files; $("csvInput").dispatchEvent(new Event("change")); }
+    else { $("fileInput").files=e.dataTransfer.files; $("fileInput").dispatchEvent(new Event("change")); } });
+
+  // wire ui
+  $("btnAdd").onclick=connectHandle; $("btnPick").onclick=connectHandle;
+  $("btnUpload").onclick=()=>$("fileInput").click();
+  $("btnCsv").onclick=()=>$("csvInput").click();
+  $("btnUrl").onclick=connectUrl;
+  $("urlInput").addEventListener("keydown",e=>{if(e.key==="Enter")connectUrl();});
+  $("eqSeg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ eqUnit=b.dataset.u; $("eqSeg").querySelectorAll("button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); renderActive(); });
+  $("histSeg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ histWindow=b.dataset.w; $("histSeg").querySelectorAll("button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); renderHistory(); });
+
+  // ============ auto-boot over http ============
+  async function boot(){
+    if(!location.protocol.startsWith("http")){
+      setStatus("","DISCONNECTED");
+      $("setupHint").textContent="Opened from disk — use “Open live file” (Chrome/Edge), or run a local server to auto-load ./accounts.json.";
+      return;
+    }
+    let files=[];
+    try{ const r=await fetch("./accounts.json",{cache:"no-store"}); if(r.ok){ const m=await r.json(); files=m.accounts||[]; } }catch(e){}
+    if(!files.length) files=["./iof_v2_dashboard_lucid.json"]; // fallback single
+    let added=0;
+    for(const fn of files){
+      try{ const r=await fetch(fn,{cache:"no-store"}); if(!r.ok) continue; const raw=await r.text(); const data=JSON.parse(raw);
+        const a=upsertAccount(data,{mode:"url",url:fn}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,raw); added++;
+      }catch(e){}
+    }
+    if(added){ startPolling(); renderTabs(); renderActive(); }
+    else setStatus("","DISCONNECTED");
+    // try trade log
+    try{ const r=await fetch("./trade_log.csv",{cache:"no-store"}); if(r.ok){ csvTrades=parseCsv(await r.text()); renderHistory(); } }catch(e){}
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

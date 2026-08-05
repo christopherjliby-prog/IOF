@@ -1,0 +1,65 @@
+{
+  "account": "LT-ON5X6Q58",
+  "label": "Lucid",
+  "symbol": "MNQ",
+  "planId": "lucid",
+  "updatedUtc": "2026-08-05T11:10:49Z",
+  "dollarsPerR": 41.0,
+
+  "live": {
+    "status": "WORKING",
+    "halt": "PROFIT_LOCK",
+    "inPosition": false,
+    "side": null,
+    "qty": 0,
+    "entry": null,
+    "unrealizedUsd": 0.0,
+    "unrealizedR": 0.0,
+    "openMaePts": 0.0,
+    "openMfePts": 0.0,
+    "trendGate": "OFF",
+    "distToProfitLockUsd": 44.5,
+    "distToDailyLossUsd": 1135.0,
+    "dailyLossLimitUsd": 1270.0,
+    "profitLockArmUsd": 479.5
+  },
+
+  "day": {
+    "date": "2026-08-05",
+    "netUsd": 135.0, "netR": 3.29,
+    "peakUsd": 479.5, "peakR": 11.7,
+    "givebackFromPeakUsd": 344.5,
+    "trades": 33, "volume": 96,
+    "wins": 7, "losses": 26, "scratches": 0,
+    "winRatePct": 21.2,
+    "payoffR": 3.47,
+    "profitFactor": 0.93,
+    "breakevenWrPct": 22.4,
+    "edgeMarginPct": -1.2,
+    "expectancyR": -0.01, "expectancyUsd": -0.4,
+    "avgWinR": 0.79, "avgWinUsd": 118.0,
+    "avgLossR": 0.23, "avgLossUsd": 41.0,
+    "bestR": 0.91, "worstR": -0.46,
+    "maxConsecLosses": 5, "maxConsecWins": 2,
+
+    "exits": { "TARGET": 5, "STOP": 2, "ADVERSE_TAPE": 25, "ZONE_INVALID": 1 },
+    "avgWinnerMaePts": 2.1,
+    "avgLoserMaePts": 5.4,
+    "avgMfePts": 8.2,
+    "winnersHitFullTpPct": 31.0
+  },
+
+  "equityCurve": [
+    { "t": "2026-08-05T03:40:45Z", "cumUsd": 0.0,   "cumR": 0.0 },
+    { "t": "2026-08-05T04:02:10Z", "cumUsd": 118.0, "cumR": 2.88 },
+    { "t": "2026-08-05T04:31:52Z", "cumUsd": 77.0,  "cumR": 1.88 },
+    { "t": "2026-08-05T05:05:14Z", "cumUsd": 236.0, "cumR": 5.76 },
+    { "t": "2026-08-05T05:44:03Z", "cumUsd": 195.0, "cumR": 4.76 },
+    { "t": "2026-08-05T06:20:37Z", "cumUsd": 403.0, "cumR": 9.83 },
+    { "t": "2026-08-05T06:58:41Z", "cumUsd": 479.5, "cumR": 11.7 },
+    { "t": "2026-08-05T07:35:22Z", "cumUsd": 356.0, "cumR": 8.68 },
+    { "t": "2026-08-05T08:41:09Z", "cumUsd": 274.0, "cumR": 6.68 },
+    { "t": "2026-08-05T09:52:48Z", "cumUsd": 176.0, "cumR": 4.29 },
+    { "t": "2026-08-05T10:40:15Z", "cumUsd": 135.0, "cumR": 3.29 }
+  ]
+}
