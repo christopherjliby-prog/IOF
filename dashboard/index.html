@@ -354,69 +354,16 @@
 
   function renderRisk(view){
     if(view._isAll){ $("riskTag").textContent=""; $("riskBody").innerHTML=`<div class="empty">Select an account tab to see its risk guards.</div>`; return; }
-    if(view.funded){ return renderFundedRisk(view); }
     const L=view.live||{}, D=view.day||{};
     $("riskTag").textContent="live";
-    const lossLimit=L.dailyLossLimitUsd, lossRoom=L.distToDailyLossUsd;
-    const lossUsed=(lossLimit!=null&&lossRoom!=null)?lossLimit-lossRoom:null;
-    const lossPct=(lossLimit)?Math.max(0,Math.min(100,(lossUsed/lossLimit)*100)):0;
-    const lossColor=lossPct>75?"var(--red)":lossPct>50?"var(--amber)":"var(--green)";
-    const armAt=L.profitLockArmUsd, peak=D.peakUsd, gb=D.givebackFromPeakUsd;
-    const locked=String(L.halt).toUpperCase()==="PROFIT_LOCK";
-    const plPct=(armAt&&peak!=null)?Math.max(0,Math.min(100,(peak/armAt)*100)):0;
+    const halt=String(L.halt||"NONE").toUpperCase();
+    // Only the fields the bot provides: distToDailyLossUsd, givebackFromPeakUsd,
+    // distToProfitLockUsd, dollarsPerR (+ day peak).
     $("riskBody").innerHTML=`
-      <div class="meter">
-        <div class="hd"><span class="k">Daily loss limit</span><span class="v ${lossRoom<lossLimit*0.25?'neg':'neu'}">${F.usd(lossRoom)} left</span></div>
-        <div class="track"><span style="width:${lossPct}%;background:${lossColor}"></span></div>
-        <div class="cap">${F.usd(lossUsed)} used of ${F.usd(lossLimit)}</div>
-      </div>
-      <div class="meter">
-        <div class="hd"><span class="k">Profit lock ${locked?'· 🔒 LOCKED':''}</span><span class="v ${locked?'neu':''}">${locked?F.usd(peak):F.usd(L.distToProfitLockUsd)+' to arm'}</span></div>
-        <div class="track"><span style="width:${plPct}%;background:${locked?'var(--cyan)':'var(--purple)'}"></span></div>
-        <div class="cap">peak ${F.usd(peak)} · arms at ${F.usd(armAt)}</div>
-      </div>
-      <div class="kv"><span class="k">Giveback from peak</span><span class="v warn">${F.usd(gb)}</span></div>
-      <div class="kv"><span class="k">Room to daily loss</span><span class="v">${F.usd(lossRoom)}</span></div>
-      <div class="kv"><span class="k">R value</span><span class="v neu">${F.usd(view.dollarsPerR)} / R</span></div>`;
-  }
-
-  // Funded-account risk model — EOD (end-of-day) drawdown, Lucid/MFFU-style.
-  // The max-loss line follows the highest END-OF-DAY settled balance and only
-  // moves at the daily close; intraday spikes do NOT raise the floor.
-  function renderFundedRisk(view){
-    const f=view.funded, D=view.day||{};
-    const start=f.accountStartUsd ?? f.accountSizeUsd ?? 0;
-    const dd=f.maxDrawdownUsd ?? f.trailingDrawdownUsd ?? 0;
-    const bal=f.balanceUsd ?? (start + (D.netUsd||0));
-    // EOD peak drives the line (falls back to any peak field, else current bal).
-    const eodPeak=f.eodPeakBalanceUsd ?? f.peakBalanceUsd ?? Math.max(bal, start);
-    const ddType=String(f.drawdownType||"EOD").toUpperCase();
-    // line: EOD peak − DD, frozen at start once it trails up to breakeven.
-    const rawLine=eodPeak-dd;
-    const locked = f.locksAtStart && rawLine>=start;
-    const ddLine = locked ? start : rawLine;
-    const dist = bal - ddLine;                          // $ to the blow line (live)
-    const cushionPct = dd ? Math.max(0,Math.min(100,(dist/dd)*100)) : 0;
-    const ddColor = cushionPct<25?"var(--red)":cushionPct<50?"var(--amber)":"var(--green)";
-    const target=f.profitTargetUsd, gained=bal-start;
-    const progPct = target ? Math.max(0,Math.min(100,(gained/target)*100)) : null;
-    const passed = target ? gained>=target : false;
-    const phase=String(f.phase||"EVAL").toUpperCase();
-    $("riskTag").textContent = `${f.firm?esc(f.firm)+" · ":""}${F.usd(f.accountSizeUsd||start)} · ${phase}`;
-    $("riskBody").innerHTML=`
-      <div class="meter">
-        <div class="hd"><span class="k">${ddType} drawdown ${locked?'· 🔒 at start':''}</span><span class="v ${cushionPct<25?'neg':'neu'}">${F.usd(dist)} to stop</span></div>
-        <div class="track"><span style="width:${cushionPct}%;background:${ddColor}"></span></div>
-        <div class="cap">stop @ ${F.usd(ddLine)} · ${F.usd(dd)} ${locked?'(locked at '+F.usd(start)+')':'below EOD peak '+F.usd(eodPeak)} · moves at close</div>
-      </div>
-      ${target!=null?`<div class="meter">
-        <div class="hd"><span class="k">Profit target ${passed?'· ✓ PASSED':''}</span><span class="v ${passed?'pos':'neu'}">${F.usd(gained)} / ${F.usd(target)}</span></div>
-        <div class="track"><span style="width:${progPct}%;background:${passed?'var(--green)':'var(--cyan)'}"></span></div>
-        <div class="cap">${passed?'target met — '+F.usd(gained-target)+' over':F.usd(target-gained)+' to pass · '+progPct.toFixed(0)+'%'}</div>
-      </div>`:`<div class="kv"><span class="k">Phase</span><span class="v pos">FUNDED</span></div>`}
-      <div class="kv"><span class="k">Account balance</span><span class="v ${gained>=0?'pos':'neg'}">${F.usd(bal)}</span></div>
-      <div class="kv"><span class="k">EOD peak balance</span><span class="v">${F.usd(eodPeak)}</span></div>
-      <div class="kv"><span class="k">Today’s giveback</span><span class="v warn">${F.usd(D.givebackFromPeakUsd)}</span></div>
+      <div class="kv"><span class="k">Daily loss remaining</span><span class="v ${halt==='DAILY_LOSS'?'neg':'neu'}">${F.usd(L.distToDailyLossUsd)}</span></div>
+      <div class="kv"><span class="k">Distance to profit lock</span><span class="v">${halt==='PROFIT_LOCK'?'🔒 LOCKED':F.usd(L.distToProfitLockUsd)}</span></div>
+      <div class="kv"><span class="k">Giveback from peak</span><span class="v warn">${F.usd(D.givebackFromPeakUsd)}</span></div>
+      <div class="kv"><span class="k">Day peak</span><span class="v pos">${F.usd(D.peakUsd)} · ${F.r(D.peakR)}</span></div>
       <div class="kv"><span class="k">R value</span><span class="v neu">${F.usd(view.dollarsPerR)} / R</span></div>`;
   }
 

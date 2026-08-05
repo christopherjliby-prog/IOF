@@ -40,13 +40,8 @@ margin, expectancy (R + $), avg win/loss, best/worst, max consecutive W/L.
 ZONE_INVALID, counts + %), avg winner MAE vs avg loser MAE (room-to-breathe),
 avg MFE, % of winners that hit full TP.
 
-**④ Risk guards** — two models, auto-selected per account:
-- **Funded (trailing drawdown)** — when the account JSON has a `funded` block
-  (both 50K accounts, Lucid + MyFunded Futures): distance to the trailing-stop
-  line, the stop level (and whether it has locked at your starting balance),
-  profit-target progress, account balance, peak, giveback, R value.
-- **Personal (daily-loss)** — fallback when there's no `funded` block: daily-loss
-  limit + remaining, profit-lock arm / LOCKED, giveback, R value.
+**④ Risk guards** — daily-loss remaining, distance to profit lock (or LOCKED),
+giveback from peak, day peak, R value ($/R).
 
 **⑤ Equity curve** — today's cumulative, toggle R / $.
 
@@ -101,21 +96,6 @@ Real JSON has no comments — the annotations below are for reference. See
   "updatedUtc": "2026-08-05T11:10:49Z",  // change-detect signal; bump every write
   "dollarsPerR": 41.0,            // avg realized 1R in $, for display
 
-  // Funded-account risk model — EOD (end-of-day) drawdown. Omit this block for
-  // a personal account and the dashboard falls back to the daily-loss panel.
-  "funded": {
-    "firm": "Lucid",              // shown in the risk-panel header
-    "phase": "EVAL",              // EVAL | FUNDED
-    "drawdownType": "EOD",        // labels the meter; EOD line moves at close
-    "accountSizeUsd": 50000,      // 50K
-    "accountStartUsd": 50000,     // starting balance the line locks to
-    "maxDrawdownUsd": 2000,       // max-loss amount below the EOD peak
-    "profitTargetUsd": 3000,      // eval target; omit/null once FUNDED
-    "balanceUsd": 51850.0,        // current balance (bot writes this, live)
-    "eodPeakBalanceUsd": 52000.0, // highest END-OF-DAY balance — drives the line
-    "locksAtStart": true          // line freezes at accountStartUsd at breakeven
-  },
-
   "live": {
     "status": "WORKING",          // WORKING | STOPPED
     "halt": "PROFIT_LOCK",        // NONE | PROFIT_LOCK | DAILY_LOSS | DISABLED
@@ -129,9 +109,7 @@ Real JSON has no comments — the annotations below are for reference. See
     "openMfePts": 0.0,
     "trendGate": "OFF",           // OFF | LONG_ONLY | SHORT_ONLY | NO_TRADE
     "distToProfitLockUsd": 44.5,  // P&L room before profit-lock arms (0 if halted)
-    "distToDailyLossUsd": 1135.0, // room before the daily-loss halt
-    "dailyLossLimitUsd": 1270.0,  // for the risk meter (optional)
-    "profitLockArmUsd": 479.5     // peak $ at which profit-lock arms (optional)
+    "distToDailyLossUsd": 1135.0  // room before the daily-loss halt
   },
 
   "day": {                        // resets at the 3 PM PDT roll
@@ -165,8 +143,8 @@ Real JSON has no comments — the annotations below are for reference. See
 }
 ```
 
-Missing fields degrade gracefully (rendered as `—`); `dailyLossLimitUsd` /
-`profitLockArmUsd` are only needed for the risk-meter fills.
+These are exactly the fields the bot provides — nothing extra. Missing fields
+render as `—`.
 
 ### `accounts.json` (served mode only)
 
