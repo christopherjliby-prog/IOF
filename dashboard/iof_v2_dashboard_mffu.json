@@ -1,8 +1,8 @@
 {
-  "account": "APX-4417K2",
-  "label": "Apex",
+  "account": "MFFU-DEMO01",
+  "label": "MyFunded Futures",
   "symbol": "MES",
-  "planId": "apex",
+  "planId": "mffu",
   "updatedUtc": "2026-08-05T11:10:51Z",
   "dollarsPerR": 62.5,
 

@@ -80,7 +80,7 @@ when served).
 Per account, rewritten on each trade close and on a short timer for live state.
 Real JSON has no comments — the annotations below are for reference. See
 [`iof_v2_dashboard_lucid.json`](./iof_v2_dashboard_lucid.json) and
-[`iof_v2_dashboard_apex.json`](./iof_v2_dashboard_apex.json) for working samples.
+[`iof_v2_dashboard_mffu.json`](./iof_v2_dashboard_mffu.json) for working samples.
 
 ```jsonc
 {
@@ -148,7 +148,7 @@ Missing fields degrade gracefully (rendered as `—`); `dailyLossLimitUsd` /
 A one-line index so the dashboard knows which account files to auto-load:
 
 ```json
-{ "accounts": ["iof_v2_dashboard_lucid.json", "iof_v2_dashboard_apex.json"] }
+{ "accounts": ["iof_v2_dashboard_lucid.json", "iof_v2_dashboard_mffu.json"] }
 ```
 
 ---
