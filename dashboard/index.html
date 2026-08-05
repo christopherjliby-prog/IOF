@@ -146,8 +146,8 @@
     </div>
     <div class="conn">
       <span class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">DISCONNECTED</span></span>
-      <button class="btn" id="btnAdd">+ Account file</button>
-      <button class="btn ghost" id="btnCsv">Load trade-log CSV</button>
+      <button class="btn" id="btnFolder">📁 Connect data folder</button>
+      <button class="btn ghost" id="btnAdd">+ Single file</button>
     </div>
   </header>
 
@@ -158,18 +158,23 @@
     <div class="panel col-12">
       <h2>Connect a trade feed</h2>
       <div class="setup">
-        <p>Point this at the <code>iof_v2_dashboard_&lt;account&gt;.json</code> your bot writes on each trade close and live timer.
-           Add one file per account — the tabs above let you switch, plus an <b>All accounts</b> roll-up.
-           Load your <code>trade_log.csv</code> for week &amp; all-time aggregates.</p>
+        <p><b>Connect the folder your bot writes to.</b> The dashboard reads every
+           <code>iof_v2_dashboard_*.json</code> for the live tiles + today (and sums them into a
+           <b>Portfolio</b> view), and aggregates every <code>iof_v2_tradelog_*.csv</code> for week &amp;
+           all-time. It re-reads on a 2 s timer and picks up new accounts automatically.</p>
         <div class="row">
-          <button class="btn" id="btnPick">📂 Open live account file</button>
-          <button class="btn ghost" id="btnUpload">⬆ Upload snapshot</button>
+          <button class="btn" id="btnFolder2">📁 Connect data folder</button>
+        </div>
+        <div class="row">
+          <button class="btn ghost" id="btnPick">📂 Add one account file</button>
+          <button class="btn ghost" id="btnCsv2">⬆ Load a trade-log CSV</button>
+          <button class="btn ghost" id="btnUpload">⬆ Upload JSON snapshot</button>
         </div>
         <div class="row">
           <input class="url" id="urlInput" placeholder="…or poll a URL  (./iof_v2_dashboard_lucid.json)" value="./iof_v2_dashboard_lucid.json" />
           <button class="btn ghost" id="btnUrl">Poll URL</button>
         </div>
-        <div class="hint" id="setupHint">“Open live file” keeps reading the same file as your bot rewrites it (Chrome/Edge).</div>
+        <div class="hint" id="setupHint">Folder access uses the File System Access API (Chrome/Edge) and keeps reading the same files as your bot rewrites them.</div>
       </div>
     </div>
   </div>
@@ -198,7 +203,7 @@
   <footer>IOF Trade State Dashboard · live JSON + trade-log CSV · <span id="footLast">no data yet</span></footer>
 
   <input type="file" id="fileInput" accept="application/json,.json" style="display:none" />
-  <input type="file" id="csvInput" accept=".csv,text/csv" style="display:none" />
+  <input type="file" id="csvInput" accept=".csv,text/csv" multiple style="display:none" />
 
 <script>
 (() => {
@@ -210,7 +215,8 @@
   // ---- state ----
   const accounts = new Map();  // key -> {key,label,source:{mode,handle,url},data,lastGood,sig}
   let activeKey = null;
-  let csvTrades = null;        // parsed CSV rows
+  let csvTrades = null;        // parsed CSV rows (concat of all tradelog files)
+  let dirHandle = null;        // connected data-folder handle (folder mode)
   let eqUnit = "R";
   let histWindow = "week";
   let timer = null;
@@ -319,7 +325,7 @@
     const haltMap={NONE:"c-green",PROFIT_LOCK:"c-cyan",DAILY_LOSS:"c-red",DISABLED:"c-gray"};
     const gateMap={OFF:"c-gray",LONG_ONLY:"c-green",SHORT_ONLY:"c-red",NO_TRADE:"c-amber"};
     const halt=String(L.halt||"NONE").toUpperCase(), gate=String(L.trendGate||"OFF").toUpperCase();
-    $("liveTag").textContent = view._isAll ? `${view._count} accounts` : `${esc(view.symbol||"")} · 1R = ${F.usd(view.dollarsPerR)}`;
+    $("liveTag").textContent = view._isAll ? `portfolio · ${view._count} accounts` : `${esc(view.symbol||"")} · 1R = ${F.usd(view.dollarsPerR)}`;
     if(view._isAll){
       $("liveBody").innerHTML = view._roster; return;
     }
@@ -554,7 +560,7 @@
     renderEquity($("eqWrap"), view.equityCurve, eqUnit);
     renderHistory();
     const anyD=view.day||{};
-    $("subline").textContent = activeKey===ALL ? `ALL ACCOUNTS · ${list.length} feeds` : `${esc(view.label||"")} · ${esc(view.account||"")} · ${esc(view.symbol||"")}`;
+    $("subline").textContent = activeKey===ALL ? `PORTFOLIO · ${list.length} accounts` : `${esc(view.label||"")} · ${esc(view.account||"")} · ${esc(view.symbol||"")}`;
   }
 
   // ============ tabs ============
@@ -565,7 +571,7 @@
       const on=activeKey===ALL;
       const agg=aggregateAccounts(list.filter(a=>a.data));
       const el=document.createElement("div"); el.className="tab"+(on?" on":"");
-      el.innerHTML=`<span class="nm">All accounts</span>${agg?`<span class="pnl ${cls(agg.netUsd)}">${F.usd(agg.netUsd)}</span>`:""}`;
+      el.innerHTML=`<span class="nm">Portfolio</span>${agg?`<span class="pnl ${cls(agg.netUsd)}">${F.usd(agg.netUsd)}</span>`:""}`;
       el.onclick=()=>{activeKey=ALL;renderTabs();renderActive();};
       t.appendChild(el);
     }
@@ -613,18 +619,59 @@
   }
 
   function tick(){
-    const list=[...accounts.values()].filter(a=>a.source&&(a.source.mode==="handle"||a.source.mode==="url"));
-    Promise.all(list.map(readSource)).then(()=>{
-      const anyLive=list.some(a=>a.lastGood&&Date.now()-a.lastGood<POLL_MS*3);
-      const anyEver=list.some(a=>a.lastGood);
-      if(anyLive) setStatus("live","LIVE · "+list.length);
-      else if(anyEver) setStatus("stale","STALE");
-      else setStatus("err","READ ERROR");
-      renderTabs();
-      $("footLast").textContent="updated "+new Date().toLocaleTimeString();
+    const pre = dirHandle ? refreshFromDir() : Promise.resolve();
+    pre.then(()=>{
+      const list=[...accounts.values()].filter(a=>a.source&&(a.source.mode==="handle"||a.source.mode==="url"));
+      return Promise.all(list.map(readSource)).then(()=>{
+        const anyLive=list.some(a=>a.lastGood&&Date.now()-a.lastGood<POLL_MS*3);
+        const anyEver=list.some(a=>a.lastGood);
+        if(anyLive) setStatus("live","LIVE · "+list.length);
+        else if(anyEver) setStatus("stale","STALE");
+        else setStatus("err","READ ERROR");
+        renderTabs();
+        if(csvTrades) renderHistory();
+        $("footLast").textContent="updated "+new Date().toLocaleTimeString();
+      });
     });
   }
   function startPolling(){ if(timer) clearInterval(timer); tick(); timer=setInterval(tick,POLL_MS); }
+
+  // Read every iof_v2_dashboard_*.json (accounts) and iof_v2_tradelog_*.csv
+  // (week/all-time) from the connected folder. Adds new accounts as files appear.
+  const RE_JSON=/^iof_v2_dashboard_.+\.json$/i, RE_CSV=/^iof_v2_tradelog_.+\.csv$/i;
+  async function refreshFromDir(){
+    if(!dirHandle) return;
+    const csvHandles=[];
+    try{
+      for await (const [name,handle] of dirHandle.entries()){
+        if(handle.kind!=="file") continue;
+        if(RE_JSON.test(name)){
+          const exists=[...accounts.values()].some(a=>a.source&&a.source._fname===name);
+          if(!exists){
+            try{ const raw=await (await handle.getFile()).text(); const data=JSON.parse(raw);
+              const a=upsertAccount(data,{mode:"handle",handle,_fname:name}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,raw);
+            }catch(err){ console.warn("skip",name,err.message); }
+          }
+        } else if(RE_CSV.test(name)){ csvHandles.push(handle); }
+      }
+    }catch(e){ console.warn("dir scan failed",e.message); }
+    if(csvHandles.length){
+      let all=[];
+      for(const h of csvHandles){ try{ all=all.concat(parseCsv(await (await h.getFile()).text())); }catch(e){} }
+      csvTrades=all;
+    }
+  }
+
+  async function connectFolder(){
+    if(!window.showDirectoryPicker){ alert("Folder access needs Chrome or Edge. Use “Add one account file”, or Poll URL."); return; }
+    try{
+      dirHandle=await window.showDirectoryPicker();
+      await refreshFromDir();
+      if(accounts.size>1) activeKey=ALL;
+      startPolling(); renderTabs(); renderActive();
+      if(!accounts.size){ setStatus("err","NO FILES FOUND"); $("setupHint").textContent="No iof_v2_dashboard_*.json in that folder — pick the folder your bot writes to."; }
+    }catch(e){ if(e&&e.name!=="AbortError") console.warn(e); }
+  }
 
   async function connectHandle(){
     if(!window.showOpenFilePicker){ alert("Live file access needs Chrome or Edge. Use Upload or Poll URL."); return; }
@@ -667,9 +714,11 @@
     return out.filter(t=>!isNaN(t.ts));
   }
   $("csvInput").addEventListener("change",e=>{
-    const f=e.target.files[0]; if(!f) return; const rd=new FileReader();
-    rd.onload=()=>{ try{ csvTrades=parseCsv(rd.result); renderHistory(); }catch(err){ alert("CSV parse failed: "+err.message);} };
-    rd.readAsText(f);
+    const fs=[...e.target.files]; if(!fs.length) return;
+    let all=[], done=0;
+    fs.forEach(f=>{ const rd=new FileReader();
+      rd.onload=()=>{ try{ all=all.concat(parseCsv(rd.result)); }catch(err){ console.warn("CSV parse:",err.message);} finally{ if(++done===fs.length){ csvTrades=(csvTrades||[]).concat(all); renderHistory(); } } };
+      rd.readAsText(f); });
   });
 
   // drag & drop (json or csv)
@@ -679,34 +728,40 @@
     else { $("fileInput").files=e.dataTransfer.files; $("fileInput").dispatchEvent(new Event("change")); } });
 
   // wire ui
+  $("btnFolder").onclick=connectFolder; $("btnFolder2").onclick=connectFolder;
   $("btnAdd").onclick=connectHandle; $("btnPick").onclick=connectHandle;
   $("btnUpload").onclick=()=>$("fileInput").click();
-  $("btnCsv").onclick=()=>$("csvInput").click();
+  $("btnCsv2").onclick=()=>$("csvInput").click();
   $("btnUrl").onclick=connectUrl;
   $("urlInput").addEventListener("keydown",e=>{if(e.key==="Enter")connectUrl();});
   $("eqSeg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ eqUnit=b.dataset.u; $("eqSeg").querySelectorAll("button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); renderActive(); });
   $("histSeg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ histWindow=b.dataset.w; $("histSeg").querySelectorAll("button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); renderHistory(); });
 
   // ============ auto-boot over http ============
+  // Served mode can't glob a directory, so it reads accounts.json — a manifest
+  // of the iof_v2_dashboard_*.json and iof_v2_tradelog_*.csv files to load.
   async function boot(){
     if(!location.protocol.startsWith("http")){
       setStatus("","DISCONNECTED");
-      $("setupHint").textContent="Opened from disk — use “Open live file” (Chrome/Edge), or run a local server to auto-load ./accounts.json.";
+      $("setupHint").textContent="Opened from disk — use “Connect data folder” (Chrome/Edge) to read every iof_v2_dashboard_*.json + iof_v2_tradelog_*.csv, or run a local server to auto-load ./accounts.json.";
       return;
     }
-    let files=[];
-    try{ const r=await fetch("./accounts.json",{cache:"no-store"}); if(r.ok){ const m=await r.json(); files=m.accounts||[]; } }catch(e){}
-    if(!files.length) files=["./iof_v2_dashboard_lucid.json"]; // fallback single
+    let files=[], logs=[];
+    try{ const r=await fetch("./accounts.json",{cache:"no-store"}); if(r.ok){ const m=await r.json(); files=m.accounts||[]; logs=m.tradelogs||[]; } }catch(e){}
+    if(!files.length) files=["./iof_v2_dashboard_lucid.json","./iof_v2_dashboard_mffu.json"];
     let added=0;
     for(const fn of files){
       try{ const r=await fetch(fn,{cache:"no-store"}); if(!r.ok) continue; const raw=await r.text(); const data=JSON.parse(raw);
         const a=upsertAccount(data,{mode:"url",url:fn}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,raw); added++;
       }catch(e){}
     }
-    if(added){ startPolling(); renderTabs(); renderActive(); }
+    if(added){ if(accounts.size>1) activeKey=ALL; startPolling(); renderTabs(); renderActive(); }
     else setStatus("","DISCONNECTED");
-    // try trade log
-    try{ const r=await fetch("./trade_log.csv",{cache:"no-store"}); if(r.ok){ csvTrades=parseCsv(await r.text()); renderHistory(); } }catch(e){}
+    // aggregate every trade log listed in the manifest
+    if(!logs.length) logs=["./iof_v2_tradelog_lucid.csv","./iof_v2_tradelog_mffu.csv"];
+    let all=[];
+    for(const fn of logs){ try{ const r=await fetch(fn,{cache:"no-store"}); if(r.ok) all=all.concat(parseCsv(await r.text())); }catch(e){} }
+    if(all.length){ csvTrades=all; renderHistory(); }
   }
   boot();
 })();

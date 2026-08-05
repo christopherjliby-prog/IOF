@@ -2,5 +2,9 @@
   "accounts": [
     "iof_v2_dashboard_lucid.json",
     "iof_v2_dashboard_mffu.json"
+  ],
+  "tradelogs": [
+    "iof_v2_tradelog_lucid.csv",
+    "iof_v2_tradelog_mffu.csv"
   ]
 }

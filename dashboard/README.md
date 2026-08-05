@@ -13,8 +13,12 @@ step, no server dependency, no external network calls — one HTML file.
 
 | Source | Role | Written by |
 |--------|------|------------|
-| `iof_v2_dashboard_<account>.json` | The **"now"** view — live state + today's rolling stats + today's equity curve. One file per account. | The bot, on each trade close and a short live-state timer. |
-| `trade_log.csv` | **Source of truth** for anything multi-day. The dashboard aggregates it for week / all-time edge stats + full equity curve. | The bot (already building it). |
+| `iof_v2_dashboard_<account>.json` | The **"now"** view — live state + today's rolling stats + today's equity curve. One file per account; the dashboard reads **every** one it finds, and sums them into a **Portfolio** tab. | The bot, on each trade close and a short live-state timer. |
+| `iof_v2_tradelog_<account>.csv` | **Source of truth** for anything multi-day. The dashboard aggregates **all** of them for week / all-time edge stats + full equity curve (filtered per account, or summed). | The bot (already building it). |
+
+Point the dashboard at the **folder** the bot writes to and it globs both
+patterns automatically — no per-file setup, and new accounts appear on their
+own as their files show up.
 
 Everything the dashboard shows is derivable from the trade-log fields
 (`pnl_r`, `mae`, `mfe`, `exit_reason`, `side`, `qty`, …) plus the bot's live
@@ -58,25 +62,26 @@ account, with a per-account roster.
 
 ## Connecting it
 
-Open `dashboard/index.html`. Three ways to feed it:
+Open `dashboard/index.html`. Ways to feed it:
 
-1. **Live file (recommended, Chrome/Edge)** — click **Open live account file**
-   / **+ Account file** and pick each `iof_v2_dashboard_<account>.json`. The
-   dashboard re-reads the same file every 2 s as the bot rewrites it, and the
-   tab dot goes green. Add one file per account.
+1. **Connect data folder (recommended, Chrome/Edge)** — click **📁 Connect data
+   folder** and pick the folder your bot writes to (e.g.
+   `C:\Users\chris\absorption_study\`). The dashboard globs it for every
+   `iof_v2_dashboard_*.json` and `iof_v2_tradelog_*.csv`, re-reads them every
+   2 s as the bot rewrites them, and adds new accounts automatically as their
+   files appear. One click, all accounts.
 2. **Serve the folder** — if `index.html` is served over http(s) alongside the
-   JSON, it auto-loads `accounts.json` (a list of the account files) and
-   `trade_log.csv` on startup and polls them. E.g. from this folder:
+   files, it auto-loads `accounts.json` (a manifest listing the account JSONs
+   and tradelog CSVs) on startup and polls them. Browsers can't list a
+   directory over http, which is why served mode needs the manifest:
    ```bash
    python3 -m http.server 8080     # then open http://localhost:8080/
    ```
-3. **Upload snapshot / drag-and-drop** — one-off view; won't auto-update.
+3. **Add one account file / Load a trade-log CSV / Upload snapshot / drag-and-drop**
+   — per-file fallbacks; CSV loading accepts multiple files at once.
 
-**Load trade-log CSV** wires up sections ⑥ (or it auto-loads `trade_log.csv`
-when served).
-
-> Live file re-reading uses the File System Access API (Chrome/Edge). Firefox/
-> Safari fall back to URL polling or snapshot upload.
+> Folder + live-file access use the File System Access API (Chrome/Edge).
+> Firefox/Safari fall back to URL polling or snapshot upload.
 
 ---
 
@@ -163,20 +168,26 @@ Real JSON has no comments — the annotations below are for reference. See
 Missing fields degrade gracefully (rendered as `—`); `dailyLossLimitUsd` /
 `profitLockArmUsd` are only needed for the risk-meter fills.
 
-### `accounts.json` (for served mode)
+### `accounts.json` (served mode only)
 
-A one-line index so the dashboard knows which account files to auto-load:
+Folder mode globs the directory and needs no manifest. Served (http) mode
+can't list a directory, so it reads this index of the files to load:
 
 ```json
-{ "accounts": ["iof_v2_dashboard_lucid.json", "iof_v2_dashboard_mffu.json"] }
+{
+  "accounts": ["iof_v2_dashboard_lucid.json", "iof_v2_dashboard_mffu.json"],
+  "tradelogs": ["iof_v2_tradelog_lucid.csv", "iof_v2_tradelog_mffu.csv"]
+}
 ```
 
 ---
 
-## The trade-log CSV
+## The trade-log CSVs
 
-Header row + one row per closed trade. Column order is free; these names are
-matched case-insensitively. Extra columns are ignored.
+One file per account: `iof_v2_tradelog_<account>.csv`. The dashboard loads and
+concatenates all of them, then filters by the active account tab (or sums for
+Portfolio). Header row + one row per closed trade. Column order is free; these
+names are matched case-insensitively. Extra columns are ignored.
 
 ```
 timestamp,account,label,symbol,side,qty,entry,exit,exit_reason,pnl_r,pnl_usd,mae,mfe
