@@ -204,6 +204,7 @@
 
   <input type="file" id="fileInput" accept="application/json,.json" style="display:none" />
   <input type="file" id="csvInput" accept=".csv,text/csv" multiple style="display:none" />
+  <script type="application/json" id="demoData">{}</script>
 
 <script>
 (() => {
@@ -684,11 +685,26 @@
   $("eqSeg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ eqUnit=b.dataset.u; $("eqSeg").querySelectorAll("button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); renderActive(); });
   $("histSeg").querySelectorAll("button").forEach(b=>b.onclick=()=>{ histWindow=b.dataset.w; $("histSeg").querySelectorAll("button").forEach(x=>x.classList.remove("on")); b.classList.add("on"); renderHistory(); });
 
+  // Embedded sample data (optional) — lets the file show a populated preview
+  // when double-clicked from disk or when no real files are found. Empty in the
+  // repo; a preview build fills #demoData. Real folder/URL data always wins.
+  function readDemo(){ try{ const el=document.getElementById("demoData"); if(el&&el.textContent.trim().length>2) return JSON.parse(el.textContent); }catch(e){} return null; }
+  function loadDemo(demo){
+    (demo.accounts||[]).forEach(data=>{ const a=upsertAccount(data,{mode:"upload"}); a.data=data; a.lastGood=Date.now(); a.sig=sigOf(data,JSON.stringify(data)); });
+    let all=[]; (demo.tradelogs||[]).forEach(t=>{ try{ all=all.concat(parseCsv(t)); }catch(e){} });
+    if(all.length) csvTrades=all;
+    if(accounts.size>1) activeKey=ALL;
+    setStatus("stale","SAMPLE DATA"); renderTabs(); renderActive(); if(csvTrades) renderHistory();
+    $("subline").textContent="SAMPLE DATA — connect your folder for live";
+  }
+
   // ============ auto-boot over http ============
   // Served mode can't glob a directory, so it reads accounts.json — a manifest
   // of the iof_v2_dashboard_*.json and iof_v2_tradelog_*.csv files to load.
   async function boot(){
     if(!location.protocol.startsWith("http")){
+      const demo=readDemo();
+      if(demo){ loadDemo(demo); return; }
       setStatus("","DISCONNECTED");
       $("setupHint").textContent="Opened from disk — use “Connect data folder” (Chrome/Edge) to read every iof_v2_dashboard_*.json + iof_v2_tradelog_*.csv, or run a local server to auto-load ./accounts.json.";
       return;
@@ -709,6 +725,8 @@
     let all=[];
     for(const fn of logs){ try{ const r=await fetch(fn,{cache:"no-store"}); if(r.ok) all=all.concat(parseCsv(await r.text())); }catch(e){} }
     if(all.length){ csvTrades=all; renderHistory(); }
+    // nothing loaded (e.g. opened as a bare file server without the data) → demo
+    if(!accounts.size){ const demo=readDemo(); if(demo) loadDemo(demo); }
   }
   boot();
 })();
